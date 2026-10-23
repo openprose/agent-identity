@@ -1,0 +1,15 @@
+{
+  "name": "agent-identity",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "deploy": "cd worker && wrangler deploy",
+    "create-app": "bun scripts/create-app.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261019.1",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,38 @@
+# Copy to wrangler.toml and fill in the placeholders. In your instance, commit
+# wrangler.toml (it holds ids, never secrets); the template never contains it.
+# scripts/create-app.ts adds APP_ID, APP_CLIENT_ID and APP_SLUG to [vars] and
+# stores APP_PRIVATE_KEY and APP_CLIENT_SECRET as Worker secrets.
+name = "agent-identity-broker"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+# account_id = "<your Cloudflare account id>"   # or set CLOUDFLARE_ACCOUNT_ID
+workers_dev = true
+
+[observability]
+enabled = true
+
+# wrangler kv namespace create agent-identity-state
+[[kv_namespaces]]
+binding = "STATE"
+id = "<kv namespace id>"
+
+# Per-session mint limit and per-IP login-start limit. Pick namespace_id values
+# unique within your Cloudflare account; Workers sharing one share a counter.
+[[ratelimits]]
+name = "MINT_LIMIT"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "LOGIN_LIMIT"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
+
+[vars]
+GITHUB_ORG = "<your-org>"
+# Only members of this team (org/<team-slug>) can log in and mint tokens.
+GITHUB_TEAM = "<team-slug>"
+# Optional cap on minted permissions (JSON). Default: contents, pull_requests
+# and issues write; actions, checks, statuses read. Never grant workflows or
+# administration write unless you have read "Limits and residual risk".
+# MAX_PERMISSIONS = '{"contents":"write","pull_requests":"write","issues":"write","actions":"read","checks":"read","statuses":"read"}'

@@ -1,0 +1,240 @@
+#!/bin/bash
+# agent-identity gh shim. agent-env.sh puts it first on PATH in agent shells
+# only. When a command targets a repository in your org, it runs the real gh
+# with a one-hour bot token for that repository instead of the personal login.
+# Other commands use the personal login, as AGENT_IDENTITY_PERSONAL allows.
+#
+#   AGENT_IDENTITY_AGENT=1            set by agent-env.sh; the shim is inert without it
+#   AGENT_IDENTITY_ORG=<org>          the org whose repositories use the bot
+#   AGENT_IDENTITY_PERSONAL=allow|read|deny
+#                                     what may use the personal login (default allow)
+#   AGENT_IDENTITY_FALLBACK=personal  a read-only command the bot is not
+#                                     permitted may use the personal login;
+#                                     writes are always refused (default: refuse)
+#   AGENT_IDENTITY_DEBUG=1            say on stderr which identity is used
+#
+# An exported GH_TOKEN or GITHUB_TOKEN wins: the shim then steps aside.
+
+# The real gh is the first gh on PATH outside this shim's directory. Compare
+# resolved paths so a symlinked PATH entry cannot make the shim call itself.
+# Depth guard: gh extensions legitimately call gh again, but two shim copies on
+# PATH would exec each other forever.
+export AGENT_IDENTITY_SHIM_DEPTH=$(( ${AGENT_IDENTITY_SHIM_DEPTH:-0} + 1 ))
+[ "$AGENT_IDENTITY_SHIM_DEPTH" -le 4 ] || { echo "agent-identity gh shim: nested too deep; is it on PATH twice?" >&2; exit 127; }
+self_dir=$(cd "$(dirname "$0")" && pwd -P)
+next=""
+IFS=: read -r -a path_entries <<< "$PATH"
+for entry in "${path_entries[@]}"; do
+  [ -n "$entry" ] && [ -x "$entry/gh" ] || continue
+  [ "$(cd "$entry" 2>/dev/null && pwd -P)" = "$self_dir" ] && continue
+  next="$entry/gh"
+  break
+done
+[ -n "$next" ] || { echo "agent-identity gh shim: no gh found on PATH" >&2; exit 127; }
+
+if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -z "$AGENT_IDENTITY_AGENT" ]; then
+  if [ -n "$AGENT_IDENTITY_AGENT" ] && [ -n "$AGENT_IDENTITY_DEBUG" ]; then
+    echo "agent-identity: GH_TOKEN/GITHUB_TOKEN is set; the shim steps aside and gh uses it." >&2
+  fi
+  exec "$next" "$@"
+fi
+
+org=${AGENT_IDENTITY_ORG:-}
+if [ -z "$org" ]; then
+  session="${XDG_CONFIG_HOME:-$HOME/.config}/agent-identity/session.json"
+  [ -f "$session" ] && org=$(jq -r '.org // empty' "$session" 2>/dev/null)
+fi
+[ -n "$org" ] || exec "$next" "$@"
+
+lower() { printf %s "$1" | tr '[:upper:]' '[:lower:]'; }
+org_lc=$(lower "$org")
+repo=""
+
+# owner/name from -R/--repo, a github.com URL, or a bare owner/name argument.
+from_arg() {
+  local value=${1#https://github.com/}
+  value=${value#http://github.com/}
+  value=${value#github.com/}
+  local owner=${value%%/*} rest=${value#*/}
+  local name=${rest%%/*}
+  name=${name%.git}
+  if [ "$owner" != "$value" ] && [ "$(lower "$owner")" = "$org_lc" ] && [[ $name =~ ^[A-Za-z0-9._-]+$ ]] \
+    && [ "$name" != . ] && [ "$name" != .. ]; then
+    printf %s "$name"
+  fi
+}
+
+origin_repo() {
+  local origin
+  origin=$(git remote get-url origin 2>/dev/null) || return 0
+  from_arg "${origin#git@github.com:}"
+}
+
+# Writes never use the personal login: a person is often an org admin, and
+# borrowing their login would let an agent do what the bot is denied
+# (including re-enabling itself after you lock it out).
+ARGS="$*"
+refuse() {
+  echo "agent-identity: $1; refusing. Run it yourself if it is needed: gh $ARGS" >&2
+  exit 1
+}
+
+# Commands the shim cannot tie to one of your org's repositories run on the
+# personal login, subject to AGENT_IDENTITY_PERSONAL:
+#   allow (default)  pass through, as in a human shell
+#   read             pass through only read-only commands; refuse writes and
+#                    `gh auth token` (which would hand the agent your token)
+#   deny             refuse everything that would use the personal login
+personal() {
+  case "${AGENT_IDENTITY_PERSONAL:-allow}" in
+    allow) exec "$next" "$@" ;;
+    deny) refuse "AGENT_IDENTITY_PERSONAL=deny: agent shells never use the personal login" ;;
+  esac
+  local readonly_cmd=""
+  case "$1" in
+    ""|help|version|--version|completion|search|status) readonly_cmd=1 ;;
+    api)
+      if [[ " $* " == *" graphql "* ]]; then
+        # An inline GraphQL query, never a mutation or a query read from a file.
+        if [[ " $* " != *mutation* ]] && [[ " $* " != *"=@"* ]] && [[ " $* " != *" --input "* ]]; then
+          readonly_cmd=1
+        fi
+      elif [ "$method" = GET ]; then
+        readonly_cmd=1
+      fi ;;
+    auth) [ "$2" = status ] && readonly_cmd=1 ;;
+    *) case "$2" in list|view|status|diff|checks|watch|download|browse|log) readonly_cmd=1 ;; esac ;;
+  esac
+  [ -n "$readonly_cmd" ] && exec "$next" "$@"
+  refuse "AGENT_IDENTITY_PERSONAL=read: only read-only commands may use the personal login"
+}
+
+# The HTTP method of a gh api call (gh defaults to POST when fields are sent).
+method=GET
+for arg in "$@"; do
+  case "$arg" in -f|--raw-field|-F|--field|--input) method=POST ;; esac
+done
+prev=""
+for arg in "$@"; do
+  case "$prev" in -X|--method) method=$(printf %s "$arg" | tr '[:lower:]' '[:upper:]') ;; esac
+  case "$arg" in
+    --method=*) method=$(printf %s "${arg#--method=}" | tr '[:lower:]' '[:upper:]') ;;
+    -X?*) method=$(printf %s "${arg#-X}" | tr '[:lower:]' '[:upper:]') ;;
+  esac
+  prev=$arg
+done
+
+# Account-level commands pass through to the personal login.
+case "$1" in
+  config|extension|alias|search|gist|ssh-key|gpg-key|status|codespace|completion|help|version|--version|"")
+    personal "$@" ;;
+esac
+
+# `gh auth token` and `gh auth git-credential` hand out the bot token inside a
+# checkout of an org repository; other auth commands pass through.
+if [ "$1" = "auth" ]; then
+  case "$2" in
+    token|git-credential) repo=$(origin_repo) ;;
+  esac
+  [ -n "$repo" ] || personal "$@"
+  token=$(agent-identity token --repo "$repo") || exit 1
+  if [ "$2" = token ]; then printf '%s\n' "$token"; exit 0; fi
+  [ "$3" = get ] || exit 0
+  host=$(sed -n 's/^host=//p')
+  [ "$host" = github.com ] && printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n' "$token"
+  exit 0
+fi
+
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -R|--repo) repo=$(from_arg "$arg"); [ -n "$repo" ] || personal "$@"; break ;;
+  esac
+  case "$arg" in
+    --repo=*) repo=$(from_arg "${arg#--repo=}"); [ -n "$repo" ] || personal "$@"; break ;;
+    -R?*) repo=$(from_arg "${arg#-R}"); [ -n "$repo" ] || personal "$@"; break ;;
+  esac
+  prev=$arg
+done
+
+if [ -z "$repo" ] && [ "$1" = "api" ]; then
+  # gh api: the endpoint path decides; only GraphQL falls back to the cwd.
+  skip=""
+  for arg in "${@:2}"; do
+    if [ -n "$skip" ]; then skip=""; continue; fi
+    case "$arg" in
+      -X|--method|-H|--header|-f|--raw-field|-F|--field|-q|--jq|-t|--template|--input|--hostname|-p|--preview|--cache)
+        skip=1; continue ;;
+      -*) continue ;;
+    esac
+    path=${arg#https://api.github.com}
+    path=${path#/}
+    if [[ $(lower "$path") =~ ^orgs/$org_lc(/|\?|$) ]] && [ "$method" != GET ]; then
+      refuse "org-level writes are never routed to the bot or the personal login"
+    elif [[ $(lower "$path") =~ ^(repositories|organizations)/ ]] && [ "$method" != GET ]; then
+      # Numeric-id endpoints can name an org repository without its name.
+      refuse "numeric-id endpoint writes are not routed"
+    elif [[ $(lower "$path") =~ ^repos/$org_lc/[a-z0-9._-]+(/|\?|$) ]]; then
+      repo=$(printf %s "$path" | cut -d/ -f3 | cut -d'?' -f1)
+    elif [ "$path" = graphql ]; then
+      repo=$(origin_repo)
+      # A mutation can target an org resource by node id from anywhere.
+      if [ -z "$repo" ] && [[ " $* " == *mutation* ]]; then
+        refuse "GraphQL mutations outside an org checkout are not routed"
+      fi
+    fi
+    break
+  done
+  [ -n "$repo" ] || personal "$@"
+fi
+
+if [ -z "$repo" ]; then
+  for arg in "$@"; do
+    case "$arg" in -*) continue ;; esac
+    candidate=$(from_arg "$arg")
+    if [ -n "$candidate" ]; then repo=$candidate; break; fi
+  done
+fi
+
+[ -n "$repo" ] || repo=$(origin_repo)
+[ -n "$repo" ] || personal "$@"
+
+# The permission this command needs beyond contents/PR/issues, if any.
+need=""
+case "$1 $2" in
+  "workflow run"|"workflow enable"|"workflow disable"|"run rerun"|"run cancel"|"run delete") need=actions:write ;;
+  "secret list") need=secrets:read ;;
+  "variable list"|"variable get") personal "$@" ;;
+  "secret "*|"variable "*) refuse "secret and variable writes stay with people" ;;
+esac
+if [ "$1" = api ]; then
+  case " $* " in
+    */rulesets*) need=administration:read ;;
+    */secrets*) need=secrets:read ;;
+    */actions/*) [ "$method" = GET ] || need=actions:write ;;
+  esac
+fi
+
+# A watch can outlive a cached token; start it with a full hour.
+fresh=""
+[ "$1 $2" = "run watch" ] && fresh=--fresh
+minted=$(agent-identity token --repo "$repo" $fresh --json) || {
+  echo "agent-identity: no bot token for $org/$repo; not falling back to the personal login." >&2
+  echo "agent-identity: run \`agent-identity login\` (as the human) or check the error above." >&2
+  exit 1
+}
+if [ -n "$need" ]; then
+  have=$(printf %s "$minted" | jq -r --arg p "${need%%:*}" '.permissions[$p] // "none"')
+  if ! { [ "$have" = write ] || { [ "$have" = read ] && [ "${need##*:}" = read ]; }; }; then
+    # Opt-in: a read the bot is not granted may use the personal login.
+    # Anything that writes is always refused.
+    if [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${need##*:}" = read ] && [ "$method" = GET ]; then
+      echo "agent-identity: the bot lacks ${need}; this read-only gh command uses the personal login." >&2
+      exec "$next" "$@"
+    fi
+    refuse "the bot token lacks ${need}"
+  fi
+fi
+token=$(printf %s "$minted" | jq -r .token)
+[ -n "$AGENT_IDENTITY_DEBUG" ] && echo "agent-identity: gh as the bot for $org/$repo" >&2
+GH_TOKEN=$token exec "$next" "$@"
