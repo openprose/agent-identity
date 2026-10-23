@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 const NAME = "agent-identity";
-const CLI_VERSION = "0.2.8";
+const CLI_VERSION = "0.2.9";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), NAME);
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), NAME);
 const SESSION_FILE = join(CONFIG_DIR, "session.json");
@@ -339,7 +339,11 @@ async function doctor(): Promise<void> {
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
-  if (command === "git-credential") return gitCredential(rest[0]);
+  if (command === "git-credential") {
+    // Whatever throws while answering for an org repository, git must still
+    // be told to stop rather than fall back to personal credentials.
+    return gitCredential(rest[0]).catch((error) => die(`git credential failed: ${(error as Error).message}`));
+  }
   const args = parseArgs(rest);
   const print = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + "\n");
   switch (command) {

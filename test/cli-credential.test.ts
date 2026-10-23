@@ -40,3 +40,15 @@ test("a broker failure for an org URL answers quit=1 instead of falling through"
   );
   expect(credential(home, "MYORG/x.git")).toEqual({ code: 0, out: "quit=1\n" });
 });
+
+test("an unexpected error while answering for an org URL still answers quit=1", () => {
+  const home = mkdtempSync(join(tmpdir(), "cli-cred-"));
+  mkdirSync(join(home, ".config/agent-identity"), { recursive: true });
+  // A session whose broker URL is not a URL makes the request path throw.
+  writeFileSync(
+    join(home, ".config/agent-identity/session.json"),
+    JSON.stringify({ session_token: "ais_" + "x".repeat(40), login: "someone", user_id: 1, device: "t", expires_at: "2099-01-01T00:00:00Z", broker: "not a url", org: "myorg", app: "a" }),
+  );
+  expect(credential(home, "MyOrg/x.git")).toEqual({ code: 0, out: "quit=1\n" });
+});
+

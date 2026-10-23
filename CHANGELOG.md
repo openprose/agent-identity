@@ -5,6 +5,11 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.9
+
+- The git credential helper answers `quit=1` for org repositories even when an
+  unexpected error escapes (not only on handled failures).
+
 ## 0.2.8
 
 Fixes from the re-verification of 0.2.7.
