@@ -318,3 +318,7 @@ bun run typecheck
 See also [THREAT_MODEL.md](THREAT_MODEL.md) (every trusted party),
 [SECURITY.md](SECURITY.md), [UPGRADING.md](UPGRADING.md) and
 [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
