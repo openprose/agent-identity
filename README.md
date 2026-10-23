@@ -298,7 +298,9 @@ Read this before relying on it.
 - **Some harnesses reset `PATH`** after shell startup files run, which hides
   the `gh` shim while the git half (environment variables) still applies.
   Check `command -v gh` inside your agent shells. If it is wrong, put the shim
-  directory on `PATH` in the harness's own settings. Non-interactive bash reads
+  directory on `PATH` in the harness's own settings, or have a `gh` wrapper
+  that *is* on that `PATH` hand off in agent shells:
+  `[ -n "$AGENT_IDENTITY_AGENT" ] && [ -z "$AGENT_IDENTITY_SHIM_DEPTH" ] && AGENT_IDENTITY_REAL_GH=/path/to/real/gh exec ~/.local/share/agent-identity/bin/gh "$@"`. Non-interactive bash reads
   none of the startup files unless `BASH_ENV` points at one.
 - **The audit log is shared within the team.** Any logged-in team member can
   read every mint record (who, which device, which repositories, which

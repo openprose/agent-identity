@@ -74,6 +74,20 @@ describe("routing", () => {
     expect(gh(args).out).toStartWith("token=personal ");
   });
 
+  test("AGENT_IDENTITY_REAL_GH lets a wrapper hand off when PATH does not include the shim", () => {
+    const proc = Bun.spawnSync([join(shimDir, "gh"), "pr", "list", "-R", "myorg/api"], {
+      cwd: root,
+      env: {
+        HOME: root,
+        PATH: `${fakeDir}:/usr/bin:/bin`,
+        AGENT_IDENTITY_AGENT: "1",
+        AGENT_IDENTITY_ORG: "myorg",
+        AGENT_IDENTITY_REAL_GH: join(fakeDir, "gh"),
+      },
+    });
+    expect(proc.stdout.toString()).toStartWith("token=bot-api ");
+  });
+
   test("outside agent shells the shim is inert", () => {
     expect(gh(["pr", "list", "-R", "myorg/api"], { AGENT_IDENTITY_AGENT: "" }).out).toStartWith("token=personal ");
   });

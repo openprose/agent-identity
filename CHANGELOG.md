@@ -5,6 +5,12 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.1
+
+- `AGENT_IDENTITY_REAL_GH` names the real `gh` for the shim, so a `gh`
+  wrapper that stays on `PATH` can hand off to the shim in harnesses that
+  reset `PATH` after shell startup (see "Limits and residual risk").
+
 ## 0.2.0
 
 First tagged release of the template.

@@ -25,12 +25,18 @@ export AGENT_IDENTITY_SHIM_DEPTH=$(( ${AGENT_IDENTITY_SHIM_DEPTH:-0} + 1 ))
 [ "$AGENT_IDENTITY_SHIM_DEPTH" -le 4 ] || { echo "agent-identity gh shim: nested too deep; is it on PATH twice?" >&2; exit 127; }
 self_dir=$(cd "$(dirname "$0")" && pwd -P)
 next=""
+# A wrapper that hands off to this shim (for harnesses that reset PATH) names
+# the real gh explicitly; otherwise search PATH.
+if [ -n "$AGENT_IDENTITY_REAL_GH" ] && [ -x "$AGENT_IDENTITY_REAL_GH" ] \
+  && [ "$(cd "$(dirname "$AGENT_IDENTITY_REAL_GH")" 2>/dev/null && pwd -P)" != "$self_dir" ]; then
+  next=$AGENT_IDENTITY_REAL_GH
+fi
 IFS=: read -r -a path_entries <<< "$PATH"
 for entry in "${path_entries[@]}"; do
+  [ -z "$next" ] || break
   [ -n "$entry" ] && [ -x "$entry/gh" ] || continue
   [ "$(cd "$entry" 2>/dev/null && pwd -P)" = "$self_dir" ] && continue
   next="$entry/gh"
-  break
 done
 [ -n "$next" ] || { echo "agent-identity gh shim: no gh found on PATH" >&2; exit 127; }
 
