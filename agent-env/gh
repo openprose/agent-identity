@@ -240,6 +240,12 @@ case "$1 $2" in
   "secret "*|"variable "*) refuse "secret and variable writes stay with people" ;;
 esac
 if [ "$1" = api ]; then
+  # GitHub shows ruleset bypass actors only to repository admins, never to an
+  # App, so with read fallback enabled, ruleset reads use the personal login.
+  if [ "$method" = GET ] && [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [[ " $* " == */rulesets* ]]; then
+    echo "agent-identity: ruleset bypass actors are visible only to admins; this read uses the personal login." >&2
+    run_unrouted "$@"
+  fi
   case " $* " in
     */rulesets*) need=administration:read ;;
     */secrets*) need=secrets:read ;;

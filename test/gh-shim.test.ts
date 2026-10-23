@@ -88,6 +88,14 @@ describe("routing", () => {
     expect(proc.stdout.toString()).toStartWith("token=bot-api ");
   });
 
+  test("with read fallback, ruleset reads use the personal login; writes never do", () => {
+    const env = { AGENT_IDENTITY_FALLBACK: "personal" };
+    expect(gh(["api", "repos/myorg/api/rulesets/1"], env).out).toStartWith("token=personal ");
+    // Without fallback the bot is used, and refused here: this token lacks administration.
+    expect(gh(["api", "repos/myorg/api/rulesets/1"]).code).toBe(1);
+    expect(gh(["api", "-X", "PUT", "repos/myorg/api/rulesets/1"], env).out).toStartWith("token=botw-api ");
+  });
+
   test("AGENT_IDENTITY_PROBE answers without running gh", () => {
     expect(gh(["version"], { AGENT_IDENTITY_PROBE: "1" }).out).toStartWith("agent-identity shim reached");
   });

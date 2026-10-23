@@ -5,6 +5,12 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.3
+
+- With `AGENT_IDENTITY_FALLBACK=personal`, `gh api` reads of rulesets use the
+  personal login: GitHub returns ruleset bypass actors only to repository
+  admins, never to an App, so release checks that verify bypass lists need it.
+
 ## 0.2.2
 
 - `doctor` checks that `gh` actually reaches the shim (directly or through a

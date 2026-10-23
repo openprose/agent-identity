@@ -146,7 +146,7 @@ calls it as a credential helper). You need to be an owner of the GitHub org.
 | `AGENT_IDENTITY_DETECT` | `~/.config/agent-identity/env.sh` | Variables whose presence marks an agent shell. Add your orchestrator's session variable here. |
 | `AGENT_IDENTITY_LABEL_VARS` | same | Variables naming the agent session; the first one set labels each token. |
 | `AGENT_IDENTITY_PERSONAL` | `env.sh` or environment | `allow` (default), `read` or `deny`: what agent shells may do with your personal login for commands not routed to the bot. |
-| `AGENT_IDENTITY_FALLBACK` | environment | `personal` lets a read-only command the bot is not permitted run on your login. Writes are always refused. Default: refuse. |
+| `AGENT_IDENTITY_FALLBACK` | environment | `personal` lets a read-only command the bot is not permitted run on your login, including ruleset reads (GitHub shows bypass actors only to admins, never to an App). Writes are always refused. Default: refuse. |
 
 ## Use
 
