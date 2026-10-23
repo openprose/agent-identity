@@ -37,7 +37,7 @@ export interface Env {
 
 const GITHUB_API = "https://api.github.com";
 // Bump with each template release; `agent-identity doctor` compares it.
-export const TEMPLATE_VERSION = "0.2.7";
+export const TEMPLATE_VERSION = "0.2.8";
 const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 const LOGIN_TTL_SECONDS = 600;
 const MEMBERSHIP_CACHE_SECONDS = 300;

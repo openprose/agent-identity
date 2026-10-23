@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 const NAME = "agent-identity";
-const CLI_VERSION = "0.2.7";
+const CLI_VERSION = "0.2.8";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), NAME);
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), NAME);
 const SESSION_FILE = join(CONFIG_DIR, "session.json");
@@ -43,8 +43,16 @@ type Session = {
 };
 type Minted = { token: string; expires_at: string; permissions: Record<string, string>; repositories: string[]; label: string };
 
+// Set while answering git for one of the org's repositories: any failure then
+// tells git to stop (`quit=1`) instead of trying the person's own helpers.
+let quitGitOnFailure = false;
+
 function die(message: string, code = 1): never {
   process.stderr.write(`${NAME}: ${message}\n`);
+  if (quitGitOnFailure) {
+    process.stdout.write("quit=1\n");
+    process.exit(0);
+  }
   process.exit(code);
 }
 
@@ -95,7 +103,9 @@ async function call(path: string, init: RequestInit & { auth?: boolean; broker?:
   }
   base ??= readSession()?.broker;
   if (!base) die(`no broker configured; run \`${NAME} login --broker URL\``);
-  const response = await fetch(`${checkBroker(base)}${path}`, { ...init, headers });
+  const response = await fetch(`${checkBroker(base)}${path}`, { ...init, headers }).catch((error) =>
+    die(`cannot reach the broker at ${base}: ${(error as Error).message}`),
+  );
   const body = await response.json().catch(() => ({}));
   if (!response.ok) die(`${(body as { error?: string }).error ?? `broker returned ${response.status}`}`);
   return body;
@@ -270,18 +280,17 @@ async function gitCredential(operation: string | undefined): Promise<void> {
   }
   if (input.protocol !== "https" || input.host !== "github.com") return;
   const session = readSession();
-  if (!session) {
-    process.stderr.write(`${NAME}: not logged in; run \`${NAME} login --broker URL\`\n`);
-    return;
-  }
+  const org = session?.org ?? process.env.AGENT_IDENTITY_ORG;
   // The path is owner/repo(.git)(/more, as for Git LFS); the repository is
   // the second segment without .git.
   const [owner, rawRepo = ""] = (input.path ?? "").split("/");
   const repo = rawRepo.replace(/\.git$/, "");
-  if (!owner || owner.toLowerCase() !== session.org.toLowerCase() || !repo) {
-    if (!input.path) process.stderr.write(`${NAME}: set credential.useHttpPath=true for github.com/${session.org}\n`);
-    return; // fall through to the next helper
+  if (!org || !owner || owner.toLowerCase() !== org.toLowerCase() || !repo) {
+    if (!input.path) process.stderr.write(`${NAME}: set credential.useHttpPath=true for github.com\n`);
+    return; // someone else's repository: fall through to the next helper
   }
+  quitGitOnFailure = true;
+  if (!session) die(`not logged in; run \`${NAME} login --broker URL\``);
   const minted = await mint([repo], { contents: "write" }, defaultLabel());
   // git 2.41+ drops the credential once it expires instead of retrying it.
   const expiry = Math.floor(Date.parse(minted.expires_at) / 1000);

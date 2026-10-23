@@ -195,26 +195,58 @@ personal() {
         readonly_cmd=1
       fi ;;
     auth) [ "$2" = status ] && readonly_cmd=1 ;;
-    *) case "$2" in list|view|status|diff|checks|watch|download|browse|log) readonly_cmd=1 ;; esac ;;
+    *) case "$2" in list|view|get|status|diff|checks|watch|download|browse|log) readonly_cmd=1 ;; esac ;;
   esac
   [ -n "$readonly_cmd" ] && run_unrouted "$@"
   refuse "AGENT_IDENTITY_PERSONAL=read: only read-only commands may use the personal login"
 }
 
-# The HTTP method of a gh api call (gh defaults to POST when fields are sent).
-method=GET
+# The HTTP method of a gh api call: an explicit -X/--method wins, otherwise
+# POST when fields or an input body are sent. Short flags can be combined
+# (`-iX DELETE`, `-ifkey=v`): walk each cluster the way gh's parser does.
+upper() { printf %s "$1" | tr '[:lower:]' '[:upper:]'; }
+explicit_method=""
+has_fields=""
+expect_method=""
 for arg in "$@"; do
-  case "$arg" in -f|--raw-field|-F|--field|--input|-f?*|-F?*|--raw-field=*|--field=*|--input=*) method=POST ;; esac
-done
-prev=""
-for arg in "$@"; do
-  case "$prev" in -X|--method) method=$(printf %s "$arg" | tr '[:lower:]' '[:upper:]') ;; esac
+  if [ -n "$expect_method" ]; then explicit_method=$(upper "$arg"); expect_method=""; continue; fi
   case "$arg" in
-    --method=*) method=$(printf %s "${arg#--method=}" | tr '[:lower:]' '[:upper:]') ;;
-    -X?*) method=$(printf %s "${arg#-X}" | tr '[:lower:]' '[:upper:]') ;;
+    --method) expect_method=1 ;;
+    --method=*) explicit_method=$(upper "${arg#--method=}") ;;
+    --field|--raw-field|--input|--field=*|--raw-field=*|--input=*) has_fields=1 ;;
+    --*) ;;
+    -?*)
+      cluster=${arg#-}
+      while [ -n "$cluster" ]; do
+        c=${cluster:0:1}
+        cluster=${cluster:1}
+        case "$c" in
+          i) ;;                                  # --include, a boolean: keep walking
+          f|F) has_fields=1; break ;;            # the rest is the field value
+          X) if [ -n "$cluster" ]; then explicit_method=$(upper "$cluster"); else expect_method=1; fi; break ;;
+          *) break ;;                            # any other flag: the rest is its value
+        esac
+      done ;;
   esac
-  prev=$arg
 done
+method=${explicit_method:-GET}
+[ -z "$explicit_method" ] && [ -n "$has_fields" ] && method=POST
+
+# True when a short-flag cluster ends in a flag that takes the next argument
+# as its value (`-iX DELETE`, `-H value`), so the endpoint scan skips it.
+takes_next() {
+  local cluster=${1#-} c
+  while [ -n "$cluster" ]; do
+    c=${cluster:0:1}
+    cluster=${cluster:1}
+    case "$c" in
+      i) ;;
+      X|f|F|H|q|t|p) [ -z "$cluster" ]; return ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
 
 # Account-level commands pass through to the personal login.
 case "$1" in
@@ -237,15 +269,16 @@ if [ "$1" = "auth" ]; then
   exit 0
 fi
 
+# The last -R/--repo wins, as in gh.
 prev=""
 explicit=""
 for arg in "$@"; do
   case "$prev" in
-    -R|--repo) explicit=$arg; break ;;
+    -R|--repo) explicit=$arg ;;
   esac
   case "$arg" in
-    --repo=*) explicit=${arg#--repo=}; break ;;
-    -R?*) explicit=${arg#-R}; break ;;
+    --repo=*) explicit=${arg#--repo=} ;;
+    -R?*) explicit=${arg#-R} ;;
   esac
   prev=$arg
 done
@@ -260,9 +293,10 @@ if [ -z "$repo" ] && [ "$1" = "api" ]; then
   for arg in "${@:2}"; do
     if [ -n "$skip" ]; then skip=""; continue; fi
     case "$arg" in
-      -X|--method|-H|--header|-f|--raw-field|-F|--field|-q|--jq|-t|--template|--input|--hostname|-p|--preview|--cache)
+      --method|--header|--raw-field|--field|--jq|--template|--input|--hostname|--preview|--cache)
         skip=1; continue ;;
-      -*) continue ;;
+      --*) continue ;;
+      -?*) takes_next "$arg" && skip=1; continue ;;
     esac
     path=$arg
     if [[ $(lower "$path") =~ ^https?://((www|api)\.)?github\.com ]]; then path=${path:${#BASH_REMATCH[0]}}; fi
@@ -293,8 +327,13 @@ fi
 if [ -z "$repo" ]; then
   for arg in "$@"; do
     case "$arg" in -*) continue ;; esac
-    candidate=$(from_arg "$arg")
-    if [ -n "$candidate" ]; then repo=$candidate; break; fi
+    ref=$(repo_ref "$arg")
+    [ -n "$ref" ] || continue
+    owner_name=${ref#* }
+    [ "$(lower "${owner_name%%/*}")" = "$org_lc" ] || continue
+    [ "${ref%% *}" = gh ] || refuse "repository '$arg' names $org on a host other than github.com"
+    repo=${owner_name#*/}
+    break
   done
 fi
 

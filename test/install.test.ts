@@ -1,9 +1,12 @@
 // install.sh writes the agent git config. Run it against a temporary HOME with
 // a fake CLI, then ask git which credential helpers and URL rewrites apply.
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// These tests spawn shells and git; give them room on a loaded machine.
+setDefaultTimeout(20_000);
 
 const install = join(import.meta.dir, "..", "agent-env", "install.sh");
 

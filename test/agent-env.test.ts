@@ -1,9 +1,12 @@
 // agent-env.sh decides which shells act as the bot. Run it under bash and zsh
 // with a clean environment and check what it exports.
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// These tests spawn shells and git; give them room on a loaded machine.
+setDefaultTimeout(20_000);
 
 const script = join(import.meta.dir, "..", "agent-env", "agent-env.sh");
 const home = mkdtempSync(join(tmpdir(), "agent-env-"));

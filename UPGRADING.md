@@ -115,7 +115,9 @@ code rollback.
   people's own logins elsewhere. `MAX_PERMISSIONS` may ask write only on
   `contents`, `pull_requests`, `issues`, `actions`, `checks`, `statuses`,
   `deployments`, `pages` and `discussions`. Re-run `agent-env/install.sh` on
-  each machine so the new git credential order applies.
+  each machine so the new git credential order applies. `install.sh` keeps an
+  existing `env.sh`, so add `CODEX_THREAD_ID` to `AGENT_IDENTITY_DETECT` there
+  yourself if Codex runs on that machine.
 
 - **0.2.0:** remove `"workflows":"write"` from `MAX_PERMISSIONS` if present
   (it is now refused, and every mint fails until you do). Requests that name

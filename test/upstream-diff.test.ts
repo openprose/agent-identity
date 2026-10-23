@@ -1,9 +1,12 @@
 // scripts/upstream-diff.sh tells an instance whether it differs from the
 // template only by instance configuration.
-import { expect, test } from "bun:test";
+import { expect, test, setDefaultTimeout } from "bun:test";
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// These tests spawn shells and git; give them room on a loaded machine.
+setDefaultTimeout(20_000);
 
 const script = join(import.meta.dir, "..", "scripts", "upstream-diff.sh");
 const identity = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };

@@ -5,6 +5,19 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.8
+
+Fixes from the re-verification of 0.2.7.
+
+- Combined short flags (`-ifkey=v`, `-iX DELETE`) are parsed the way `gh`
+  parses them: they count as writes, and the endpoint scan skips their values.
+- For your org's repositories in any letter case, the git credential helper
+  answers `quit=1` when it cannot mint (no session, broker unreachable), so git
+  never falls through to personal credentials.
+- The last `-R` wins, as in `gh`; positional org references on another host are
+  refused; `gh variable get` counts as a read.
+- Spawn-heavy tests get longer timeouts.
+
 ## 0.2.7
 
 Fixes from an adversarial pre-publication review.

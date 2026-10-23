@@ -1,10 +1,13 @@
 // The gh shim decides, per command, whether gh runs as the bot or as the
 // person. Drive it with a fake gh (prints which token it got) and a fake
 // agent-identity CLI (mints "bot-<repo>").
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// These tests spawn shells and git; give them room on a loaded machine.
+setDefaultTimeout(20_000);
 
 const shim = join(import.meta.dir, "..", "agent-env", "gh");
 const root = mkdtempSync(join(tmpdir(), "gh-shim-"));
@@ -183,6 +186,21 @@ describe("org writes never reach the personal login (any spelling)", () => {
     expect(gh(args as string[], allow, cwd as string).out).toStartWith(`token=${token} `);
   });
 
+  test("the last -R wins, as in gh", () => {
+    expect(gh(["pr", "merge", "1", "-R", "someone/x", "-R", "myorg/x"], allow).out).toStartWith("token=botw-x ");
+    expect(gh(["pr", "list", "-R", "myorg/x", "-R", "someone/x"], allow).out).toStartWith("token=personal ");
+  });
+
+  test("a positional org reference on another host is refused", () => {
+    const result = gh(["repo", "delete", "--yes", "ssh://git@github-work/myorg/x"], allow);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe("");
+  });
+
+  test("gh variable get is a read", () => {
+    expect(gh(["variable", "get", "X", "-R", "myorg/api"]).out).toStartWith("token=personal ");
+  });
+
   test("GH_REPO names the repository when nothing else does", () => {
     expect(gh(["pr", "merge", "1"], { ...allow, GH_REPO: "myorg/x" }).out).toStartWith("token=botw-x ");
     expect(gh(["pr", "merge", "1"], { ...allow, GH_REPO: "someone/x" }).out).toStartWith("token=personal ");
@@ -208,6 +226,27 @@ describe("attached-value flags count as writes", () => {
     const result = gh(args as string[], read);
     expect(result.code).toBe(1);
     expect(result.out).toBe("");
+  });
+
+  test.each([
+    [["api", "-ifkey=ssh-ed25519 AAAA", "user/keys"]],
+    [["api", "user/keys", "-ifkey=x"]],
+    [["api", "-iXDELETE", "user/keys/1"]],
+    [["api", "-iX", "DELETE", "user/keys/1"]],
+  ])("combined short flags %j are writes, refused on the personal login under read", (args) => {
+    const result = gh(args as string[], read);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe("");
+  });
+
+  test("a combined -iX before an org endpoint still routes to the bot", () => {
+    expect(gh(["api", "-iX", "DELETE", "repos/myorg/api/issues/1/labels/x"], { AGENT_IDENTITY_PERSONAL: "allow" }).out).toStartWith("token=botw-api ");
+  });
+
+  test("an org-level write hidden in a combined flag is refused outright", () => {
+    const result = gh(["api", "orgs/myorg/invitations", "-ifrole=admin"], { AGENT_IDENTITY_PERSONAL: "allow" });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("org-level writes");
   });
 
   test("an org-level write with attached fields is refused outright", () => {

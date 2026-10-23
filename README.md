@@ -91,7 +91,11 @@ example `CLAUDECODE`, set by Claude Code), it:
   are authored by the bot, SSH and `www.` spellings of org remotes are routed
   through `https://github.com`, and git asks the broker first for every
   github.com credential: it answers for your org in any letter case, and git
-  falls through to your usual helpers for anyone else. Git credentials are
+  falls through to your usual helpers for anyone else. For your org it never
+  falls through: if the broker cannot answer, git is told to stop rather than
+  try your own credentials. Agent shells send git the repository path for
+  every github.com credential (`useHttpPath`), so a keychain-style helper that
+  stored host-only entries may ask again for other owners' repositories. Git credentials are
   minted with `contents: write` (a push needs it); `gh auth token` inside an
   org checkout returns a write token for the same reason.
 
@@ -295,8 +299,10 @@ Read this before relying on it.
   branches with rulesets that do **not** list the App as a bypass actor. If you
   deliberately let agents push a release branch, keep force-push, deletion and
   required-CI rules in a separate ruleset that nobody can bypass.
-- **Workflows and Actions.** Pushes by App tokens trigger workflows, so keep
-  deployment secrets in environments with branch restrictions. The broker never
+- **Workflows and Actions.** Pushes by App tokens trigger workflows, and
+  `actions` or `deployments` write lets agents start workflow runs and
+  deployments, so keep deployment secrets in environments with branch
+  restrictions: those rules, not the broker, decide what a run may deploy. The broker never
   grants `workflows` write, so agents cannot edit `.github/workflows`; if your
   team needs that, change `WRITABLE` in `worker/src/lib.ts` deliberately in your
   fork of the template, not in configuration.
