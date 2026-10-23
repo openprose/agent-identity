@@ -5,6 +5,11 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.2
+
+- `doctor` checks that `gh` actually reaches the shim (directly or through a
+  wrapper's `AGENT_IDENTITY_REAL_GH` handoff), not just where `gh` resolves.
+
 ## 0.2.1
 
 - `AGENT_IDENTITY_REAL_GH` names the real `gh` for the shim, so a `gh`

@@ -88,6 +88,10 @@ describe("routing", () => {
     expect(proc.stdout.toString()).toStartWith("token=bot-api ");
   });
 
+  test("AGENT_IDENTITY_PROBE answers without running gh", () => {
+    expect(gh(["version"], { AGENT_IDENTITY_PROBE: "1" }).out).toStartWith("agent-identity shim reached");
+  });
+
   test("outside agent shells the shim is inert", () => {
     expect(gh(["pr", "list", "-R", "myorg/api"], { AGENT_IDENTITY_AGENT: "" }).out).toStartWith("token=personal ");
   });

@@ -42,6 +42,13 @@ done
 
 [ -n "$AGENT_IDENTITY_AGENT" ] || exec "$next" "$@"
 
+# `agent-identity doctor` checks that gh reaches this shim, directly or via a
+# wrapper's handoff, without running anything.
+if [ "$AGENT_IDENTITY_PROBE" = 1 ]; then
+  echo "agent-identity shim reached; real gh: $next"
+  exit 0
+fi
+
 # A GH_TOKEN/GITHUB_TOKEN inherited from the environment must not let an agent
 # act on your org's repositories as someone else: for org targets the shim
 # ignores it and uses the bot. Other targets still get it. The shim's own

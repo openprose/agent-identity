@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 const NAME = "agent-identity";
-const CLI_VERSION = "0.2.1";
+const CLI_VERSION = "0.2.2";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), NAME);
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), NAME);
 const SESSION_FILE = join(CONFIG_DIR, "session.json");
@@ -307,8 +307,9 @@ async function doctor(): Promise<void> {
     if (process.env.AGENT_IDENTITY_AGENT) {
       const helper = Bun.spawnSync(["git", "config", "--get-urlmatch", "credential.helper", `https://github.com/${session.org}/x`]).stdout.toString();
       check(helper.includes(`${NAME} git-credential`), "git uses the broker for your org", "check GIT_CONFIG_COUNT and agent.gitconfig");
+      const probe = Bun.spawnSync(["sh", "-c", "AGENT_IDENTITY_PROBE=1 gh version"]).stdout.toString();
       const gh = Bun.spawnSync(["sh", "-c", "command -v gh"]).stdout.toString().trim();
-      check(gh.includes("agent-identity/bin/gh"), `gh resolves to the shim (${gh || "none"})`, "the harness may reset PATH after shell startup");
+      check(probe.includes("agent-identity shim reached"), `gh reaches the shim (gh is ${gh || "missing"})`, "the harness may reset PATH; see AGENT_IDENTITY_REAL_GH");
     } else {
       process.stdout.write("note not an agent shell; run doctor inside one to check the shell wiring\n");
     }
