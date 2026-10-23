@@ -22,11 +22,13 @@ beforeAll(() => {
   writeFileSync(
     join(fakeDir, "agent-identity"),
     `#!/bin/bash
-repo=""; json=""
-while [ $# -gt 0 ]; do case "$1" in --repo) repo=$2; shift ;; --json) json=1 ;; esac; shift; done
+repo=""; json=""; kind=bot
+while [ $# -gt 0 ]; do case "$1" in --repo) repo=$2; shift ;; --json) json=1 ;; --write) kind=botw ;; esac; shift; done
 [ "$FAKE_MINT" = fail ] && { echo "not logged in" >&2; exit 1; }
-if [ -n "$json" ]; then printf '{"token":"bot-%s","permissions":%s}\\n' "$repo" "\${FAKE_PERMS:-{\\"contents\\":\\"write\\",\\"actions\\":\\"read\\"}}"
-else printf 'bot-%s\\n' "$repo"; fi
+if [ "$kind" = botw ]; then perms="\${FAKE_PERMS:-{\\"contents\\":\\"write\\",\\"actions\\":\\"read\\"}}"
+else perms='{"contents":"read","actions":"read"}'; fi
+if [ -n "$json" ]; then printf '{"token":"%s-%s","permissions":%s}\\n' "$kind" "$repo" "$perms"
+else printf '%s-%s\\n' "$kind" "$repo"; fi
 `,
   );
   chmodSync(join(fakeDir, "gh"), 0o755);
@@ -76,8 +78,22 @@ describe("routing", () => {
     expect(gh(["pr", "list", "-R", "myorg/api"], { AGENT_IDENTITY_AGENT: "" }).out).toStartWith("token=personal ");
   });
 
-  test("an explicit GH_TOKEN is respected", () => {
-    expect(gh(["pr", "list", "-R", "myorg/api"], { GH_TOKEN: "given" }).out).toStartWith("token=given ");
+  test("reads get a read-only token and writes ask for --write", () => {
+    expect(gh(["pr", "view", "1", "-R", "myorg/api"]).out).toStartWith("token=bot-api ");
+    expect(gh(["pr", "merge", "1", "-R", "myorg/api"]).out).toStartWith("token=botw-api ");
+    expect(gh(["api", "-X", "POST", "repos/myorg/api/issues"]).out).toStartWith("token=botw-api ");
+    expect(gh(["api", "repos/myorg/api/issues"]).out).toStartWith("token=bot-api ");
+  });
+
+  test("an inherited GH_TOKEN never stands in for the bot on org repositories", () => {
+    expect(gh(["pr", "list", "-R", "myorg/api"], { GH_TOKEN: "inherited" }).out).toStartWith("token=bot-api ");
+    expect(gh(["pr", "list", "-R", "someone/else"], { GH_TOKEN: "inherited" }).out).toStartWith("token=inherited ");
+    expect(gh(["pr", "list", "-R", "myorg/api"], { GITHUB_TOKEN: "inherited" }).out).toStartWith("token=bot-api ");
+  });
+
+  test("the shim's own token and AGENT_IDENTITY_RESPECT_GH_TOKEN pass straight through", () => {
+    expect(gh(["pr", "list", "-R", "myorg/api"], { GH_TOKEN: "botw-api", AGENT_IDENTITY_SHIM_TOKEN: "1" }).out).toStartWith("token=botw-api ");
+    expect(gh(["pr", "list", "-R", "myorg/api"], { GH_TOKEN: "mine", AGENT_IDENTITY_RESPECT_GH_TOKEN: "1" }).out).toStartWith("token=mine ");
   });
 
   test("the checkout's origin decides when nothing names a repository", () => {
@@ -86,7 +102,7 @@ describe("routing", () => {
   });
 
   test("gh auth token returns the bot token inside an org checkout only", () => {
-    expect(gh(["auth", "token"], {}, checkout).out).toBe("bot-widgets");
+    expect(gh(["auth", "token"], {}, checkout).out).toBe("botw-widgets");
     expect(gh(["auth", "token"]).out).toStartWith("token=personal ");
   });
 });
@@ -144,7 +160,7 @@ describe("refusals", () => {
       expect(result.out).toBe("");
     }
     // Org repositories still use the bot.
-    expect(gh(["pr", "create", "-R", "myorg/api"], env).out).toStartWith("token=bot-api ");
+    expect(gh(["pr", "create", "-R", "myorg/api"], env).out).toStartWith("token=botw-api ");
   });
 
   test("AGENT_IDENTITY_PERSONAL=deny refuses every personal-login command", () => {
@@ -160,7 +176,7 @@ describe("refusals", () => {
 
   test("with the permission granted, the bot runs it", () => {
     const perms = JSON.stringify({ contents: "write", actions: "write" });
-    expect(gh(["workflow", "run", "ci.yml", "-R", "myorg/api"], { FAKE_PERMS: perms }).out).toStartWith("token=bot-api ");
+    expect(gh(["workflow", "run", "ci.yml", "-R", "myorg/api"], { FAKE_PERMS: perms }).out).toStartWith("token=botw-api ");
   });
 
   test("two shim copies on PATH stop instead of looping", () => {

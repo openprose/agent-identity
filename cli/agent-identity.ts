@@ -2,14 +2,17 @@
 // agent-identity: get short-lived GitHub tokens for agents from your broker.
 //
 //   agent-identity login --broker URL [--device NAME]   one-time browser login per machine
-//   agent-identity token [--repo R]... [--fresh]        print a 1-hour installation token
-//   agent-identity env [--repo R]...                    print exports for gh and git identity
+//   agent-identity token [--repo R]... [--write] [--fresh]  print a 1-hour installation token
+//   agent-identity env [--repo R]... [--write]          print exports for gh and git identity
 //   agent-identity git-credential get                   git credential helper (your org only)
+//   agent-identity trailers                             commit trailers naming the human and session
+//   agent-identity doctor                               check the broker, versions and wiring
 //   agent-identity config                               print org, app and broker
 //   agent-identity whoami | sessions | revoke-all | logout | audit [--sha HEX]
 //
-// Without --repo, token and env use the repository of the current directory's
-// `origin` remote when it belongs to your org. --perm name=read|write narrows.
+// Tokens are read-only unless you pass --write (the deployment's ceiling) or
+// --perm name=read|write. Without --repo, the current checkout's origin is used
+// when it belongs to your org.
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -17,6 +20,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 const NAME = "agent-identity";
+const CLI_VERSION = "0.2.0";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), NAME);
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), NAME);
 const SESSION_FILE = join(CONFIG_DIR, "session.json");
@@ -30,6 +34,7 @@ const DEFAULT_LABEL_VARS = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"];
 type Session = {
   session_token: string;
   login: string;
+  user_id: number;
   device: string;
   expires_at: string;
   broker: string;
@@ -137,6 +142,21 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
+// Revoke every cached installation token at GitHub, then drop the cache.
+async function revokeCachedTokens(): Promise<void> {
+  if (!existsSync(CACHE_DIR)) return;
+  for (const name of readdirSync(CACHE_DIR)) {
+    const cached = readJsonFile<Minted>(join(CACHE_DIR, name));
+    if (cached && Date.parse(cached.expires_at) > Date.now()) {
+      await fetch("https://api.github.com/installation/token", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${cached.token}`, accept: "application/vnd.github+json", "user-agent": `${NAME}-cli` },
+      }).catch(() => undefined);
+    }
+  }
+  rmSync(CACHE_DIR, { recursive: true, force: true });
+}
+
 function pruneCache(): void {
   if (!existsSync(CACHE_DIR)) return;
   for (const name of readdirSync(CACHE_DIR)) {
@@ -146,7 +166,8 @@ function pruneCache(): void {
 }
 
 // `fresh` skips the cache so long-running callers (gh run watch) get a full hour.
-async function mint(repos: string[], perms: Record<string, string>, label: string, fresh = false): Promise<Minted> {
+// `write` asks for the deployment's full ceiling; otherwise tokens are read-only.
+async function mint(repos: string[], perms: Record<string, string>, label: string, fresh = false, write = false): Promise<Minted> {
   const session = requireSession();
   const prefix = new RegExp(`^${session.org}/`, "i");
   repos = repos.map((repo) => repo.replace(prefix, ""));
@@ -155,9 +176,10 @@ async function mint(repos: string[], perms: Record<string, string>, label: strin
     if (!inferred) die(`pass --repo NAME (no ${session.org} origin remote in this directory)`);
     repos = [inferred];
   }
+  if (write && Object.keys(perms).length) die("use --write or --perm, not both");
   const request = {
     repositories: [...new Set(repos)].sort(),
-    ...(Object.keys(perms).length ? { permissions: perms } : {}),
+    ...(Object.keys(perms).length ? { permissions: perms } : { access: write ? "write" : "read" }),
     label,
   };
   const cacheFile = join(CACHE_DIR, `${sha256(session.session_token + JSON.stringify(request)).slice(0, 32)}.json`);
@@ -257,7 +279,48 @@ async function gitCredential(operation: string | undefined): Promise<void> {
     return; // fall through to the next helper
   }
   const minted = await mint([repo], { contents: "write" }, defaultLabel());
-  process.stdout.write(`username=x-access-token\npassword=${minted.token}\n`);
+  // git 2.41+ drops the credential once it expires instead of retrying it.
+  const expiry = Math.floor(Date.parse(minted.expires_at) / 1000);
+  process.stdout.write(`username=x-access-token\npassword=${minted.token}\npassword_expiry_utc=${expiry}\n`);
+}
+
+async function doctor(): Promise<void> {
+  let failed = false;
+  const check = (ok: boolean, label: string, hint = "") => {
+    const suffix = !ok && hint ? ` (${hint})` : "";
+    process.stdout.write(`${ok ? "ok  " : "FAIL"} ${label}${suffix}\n`);
+    if (!ok) failed = true;
+  };
+  const session = readSession();
+  check(Boolean(session), "logged in", `run ${NAME} login --broker URL`);
+  if (session) {
+    const version = await fetch(`${checkBroker(session.broker)}/version`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+    check(Boolean(version), `broker reachable at ${session.broker}`);
+    if (version) {
+      check(version.version === CLI_VERSION, `broker ${version.version} matches CLI ${CLI_VERSION}`, "merge the same template release into both");
+      check(!version.error, "broker configuration valid", version.error);
+      check(version.configured === true, "broker has its GitHub App secrets", "run scripts/create-app.ts");
+    }
+    check(Date.parse(session.expires_at) > Date.now() + 3 * 86_400_000, `session valid until ${session.expires_at}`, "log in again soon");
+    if (process.env.AGENT_IDENTITY_AGENT) {
+      const helper = Bun.spawnSync(["git", "config", "--get-urlmatch", "credential.helper", `https://github.com/${session.org}/x`]).stdout.toString();
+      check(helper.includes(`${NAME} git-credential`), "git uses the broker for your org", "check GIT_CONFIG_COUNT and agent.gitconfig");
+      const gh = Bun.spawnSync(["sh", "-c", "command -v gh"]).stdout.toString().trim();
+      check(gh.includes("agent-identity/bin/gh"), `gh resolves to the shim (${gh || "none"})`, "the harness may reset PATH after shell startup");
+    } else {
+      process.stdout.write("note not an agent shell; run doctor inside one to check the shell wiring\n");
+    }
+  }
+  const gitVersion = /(\d+)\.(\d+)/.exec(Bun.spawnSync(["git", "--version"]).stdout.toString());
+  const major = gitVersion ? Number(gitVersion[1]) : 0;
+  const minor = gitVersion ? Number(gitVersion[2]) : 0;
+  check(major > 2 || (major === 2 && minor >= 36), `git ${major}.${minor} (2.36+ needed for hasconfig includes)`);
+  if (major === 2 && minor >= 36 && minor < 41) {
+    process.stdout.write(`warn git ${major}.${minor} ignores credential expiry; 2.41+ drops expired tokens itself\n`);
+  }
+  process.exit(failed ? 1 : 0);
 }
 
 async function main(): Promise<void> {
@@ -273,13 +336,13 @@ async function main(): Promise<void> {
       return print({ org: session.org, app: session.app, broker: session.broker, login: session.login });
     }
     case "token": {
-      const minted = await mint(args.repos, args.perms, args.label, args.flags.has("fresh"));
+      const minted = await mint(args.repos, args.perms, args.label, args.flags.has("fresh"), args.flags.has("write"));
       if (args.flags.has("json")) print(minted);
       else process.stdout.write(minted.token + "\n");
       return;
     }
     case "env": {
-      const minted = await mint(args.repos, args.perms, args.label);
+      const minted = await mint(args.repos, args.perms, args.label, false, args.flags.has("write"));
       const bot = await botIdentity();
       const lines = [
         `export GH_TOKEN=${shellQuote(minted.token)}`,
@@ -293,20 +356,33 @@ async function main(): Promise<void> {
     }
     case "bot":
       return print(await botIdentity());
+    case "trailers": {
+      // For commit messages: who asked, and from which agent session.
+      const session = requireSession();
+      process.stdout.write(
+        `Co-authored-by: ${session.login} <${session.user_id}+${session.login}@users.noreply.github.com>\n` +
+          `Agent-Session: ${args.label}\n`,
+      );
+      return;
+    }
+    case "doctor":
+      return doctor();
     case "whoami":
       return print({ broker: requireSession().broker, ...(await call("/v1/whoami")) });
     case "sessions":
       return print(await call("/v1/sessions"));
-    case "revoke-all":
-      print(await call("/v1/sessions/revoke-all", { method: "POST" }));
+    case "revoke-all": {
+      // Revoke this machine's tokens even if the broker call fails.
+      await revokeCachedTokens();
+      const result = await call("/v1/sessions/revoke-all", { method: "POST" });
       rmSync(SESSION_FILE, { force: true });
-      rmSync(CACHE_DIR, { recursive: true, force: true });
-      return;
+      return print(result);
+    }
     case "logout": {
       // Clear local state first: a broker error must not leave a session behind.
       const session = readSession();
       rmSync(SESSION_FILE, { force: true });
-      rmSync(CACHE_DIR, { recursive: true, force: true });
+      await revokeCachedTokens();
       if (session) {
         const response = await fetch(`${checkBroker(session.broker)}/v1/logout`, {
           method: "POST",
@@ -322,7 +398,7 @@ async function main(): Promise<void> {
       return print(await call(`/v1/audit?${query}`));
     }
     default:
-      process.stderr.write(readFileSync(import.meta.path, "utf8").split("\n").slice(1, 13).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+      process.stderr.write(readFileSync(import.meta.path, "utf8").split("\n").slice(1, 16).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
       process.exit(command ? 2 : 0);
   }
 }

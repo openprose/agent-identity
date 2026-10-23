@@ -6,7 +6,9 @@
 
 import {
   appJwt,
+  parseDefaultAccess,
   parseMaxPermissions,
+  sha256Base64,
   importAppKey,
   randomToken,
   sha256Hex,
@@ -22,6 +24,9 @@ export interface Env {
   GITHUB_TEAM: string;
   // Optional JSON object capping minted permissions; see lib.ts.
   MAX_PERMISSIONS?: string;
+  // "read" (default): requests that name no permissions get read-only tokens.
+  // "ceiling": they get the full ceiling (the behaviour of older CLIs).
+  DEFAULT_ACCESS?: string;
   APP_ID?: string;
   APP_CLIENT_ID?: string;
   APP_SLUG?: string;
@@ -30,6 +35,8 @@ export interface Env {
 }
 
 const GITHUB_API = "https://api.github.com";
+// Bump with each template release; `agent-identity doctor` compares it.
+export const TEMPLATE_VERSION = "0.2.0";
 const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 const LOGIN_TTL_SECONDS = 600;
 const MEMBERSHIP_CACHE_SECONDS = 300;
@@ -417,7 +424,11 @@ async function mint(env: Env, request: Request): Promise<Response> {
   if (!(await env.MINT_LIMIT.limit({ key })).success) {
     throw new HttpError(429, "too many tokens minted by this session; reuse cached tokens (the CLI caches them)");
   }
-  const validated = validateMintRequest(await readJson(request), parseMaxPermissions(env.MAX_PERMISSIONS));
+  const validated = validateMintRequest(
+    await readJson(request),
+    parseMaxPermissions(env.MAX_PERMISSIONS),
+    parseDefaultAccess(env.DEFAULT_ACCESS),
+  );
   if ("error" in validated) throw new HttpError(400, validated.error);
   const granted = await grantedPermissions(env);
   for (const [name, level] of Object.entries(validated.permissions)) {
@@ -440,17 +451,26 @@ async function mint(env: Env, request: Request): Promise<Response> {
     repositories: minted.repositories?.map((r) => r.name) ?? "all",
     permissions: minted.permissions,
     token_sha256: await sha256Hex(minted.token),
+    // Joins GitHub's audit-log `hashed_token` field.
+    token_sha256_b64: await sha256Base64(minted.token),
     expires_at: minted.expires_at,
   };
   console.log(JSON.stringify(audit));
+  // Fail closed: a token without an audit record is revoked, never returned.
   // Newest-first keys so a plain prefix list returns recent entries.
   const newestFirst = String(9_999_999_999_999 - Date.now()).padStart(13, "0");
-  await Promise.all([
-    env.STATE.put(`audit:${newestFirst}:${audit.token_sha256.slice(0, 12)}`, JSON.stringify(audit), {
-      expirationTtl: AUDIT_TTL_SECONDS,
-    }),
-    env.STATE.put(`audit-sha:${audit.token_sha256}`, JSON.stringify(audit), { expirationTtl: AUDIT_TTL_SECONDS }),
-  ]);
+  try {
+    await Promise.all([
+      env.STATE.put(`audit:${newestFirst}:${audit.token_sha256.slice(0, 12)}`, JSON.stringify(audit), {
+        expirationTtl: AUDIT_TTL_SECONDS,
+      }),
+      env.STATE.put(`audit-sha:${audit.token_sha256}`, JSON.stringify(audit), { expirationTtl: AUDIT_TTL_SECONDS }),
+    ]);
+  } catch (error) {
+    const revoked = await github("/installation/token", minted.token, { method: "DELETE" }).catch(() => undefined);
+    console.error(JSON.stringify({ event: "audit_write_failed", token_sha256: audit.token_sha256, revoked: revoked?.status === 204, message: String(error) }));
+    throw new HttpError(503, "could not record the audit entry; the token was revoked");
+  }
   return json({
     token: minted.token,
     expires_at: minted.expires_at,
@@ -483,6 +503,19 @@ export default {
       switch (route) {
         case "GET /health":
           return json({ ok: true, configured: configured(env), app: env.APP_SLUG ?? null, org: env.GITHUB_ORG });
+        case "GET /version": {
+          // Surfaces a bad MAX_PERMISSIONS / DEFAULT_ACCESS before anyone mints.
+          let config: Record<string, unknown>;
+          try {
+            config = {
+              max_permissions: parseMaxPermissions(env.MAX_PERMISSIONS),
+              default_access: parseDefaultAccess(env.DEFAULT_ACCESS),
+            };
+          } catch (error) {
+            config = { error: (error as Error).message };
+          }
+          return json({ version: TEMPLATE_VERSION, configured: configured(env), ...config });
+        }
         case "POST /v1/login/start":
           return await loginStart(env, request, origin);
         case "GET /v1/login/callback":

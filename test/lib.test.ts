@@ -1,13 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { appJwt, DEFAULT_MAX_PERMISSIONS, importAppKey, parseMaxPermissions, validateMintRequest } from "../worker/src/lib";
+import {
+  appJwt,
+  DEFAULT_MAX_PERMISSIONS,
+  importAppKey,
+  parseDefaultAccess,
+  parseMaxPermissions,
+  readOnly,
+  sha256Base64,
+  validateMintRequest,
+} from "../worker/src/lib";
 
 describe("validateMintRequest", () => {
-  test("requires repositories and defaults to the full allowed permission set", () => {
+  test("is read-only unless writes are asked for", () => {
     expect(validateMintRequest({ repositories: ["docs"] })).toEqual({
       repositories: ["docs"],
-      permissions: DEFAULT_MAX_PERMISSIONS,
+      permissions: readOnly(DEFAULT_MAX_PERMISSIONS),
       label: "unlabeled",
+    });
+    expect(validateMintRequest({ repositories: ["docs"], access: "read" })).toMatchObject({ permissions: readOnly(DEFAULT_MAX_PERMISSIONS) });
+    expect(validateMintRequest({ repositories: ["docs"], access: "write" })).toMatchObject({ permissions: DEFAULT_MAX_PERMISSIONS });
+  });
+
+  test("a deployment may keep the old ceiling default", () => {
+    expect(validateMintRequest({ repositories: ["docs"] }, DEFAULT_MAX_PERMISSIONS, "ceiling")).toMatchObject({ permissions: DEFAULT_MAX_PERMISSIONS });
+    expect(validateMintRequest({ repositories: ["docs"], access: "read" }, DEFAULT_MAX_PERMISSIONS, "ceiling")).toMatchObject({
+      permissions: readOnly(DEFAULT_MAX_PERMISSIONS),
     });
   });
 
@@ -18,7 +36,7 @@ describe("validateMintRequest", () => {
 
   test("honours a deployment's configured cap", () => {
     const max = parseMaxPermissions('{"contents":"read","actions":"write"}');
-    expect(validateMintRequest({ repositories: ["api"] }, max)).toMatchObject({ permissions: { metadata: "read", contents: "read", actions: "write" } });
+    expect(validateMintRequest({ repositories: ["api"], access: "write" }, max)).toMatchObject({ permissions: { metadata: "read", contents: "read", actions: "write" } });
     expect(validateMintRequest({ repositories: ["api"], permissions: { contents: "write" } }, max)).toEqual({ error: "permission contents is capped at read" });
   });
 
@@ -36,6 +54,8 @@ describe("validateMintRequest", () => {
     [{ repositories: Array.from({ length: 21 }, (_, i) => `r${i}`) }, "at most 20"],
     [{ repositories: ["docs"], label: "bad label with spaces" }, "label must be"],
     [{ repositories: ["docs"], installation_id: 1 }, "unknown field"],
+    [{ repositories: ["docs"], access: "admin" }, "access must be read or write"],
+    [{ repositories: ["docs"], access: "write", permissions: { contents: "read" } }, "not both"],
     [{ repositories: ["docs"], permissions: { constructor: "read" } }, "permission not allowed: constructor"],
     [[], "JSON object"],
   ])("rejects %j", (body, message) => {
@@ -58,11 +78,25 @@ describe("parseMaxPermissions", () => {
     ['{"administration":"write"}', "may not be write"],
     ['{"secrets":"write"}', "may not be write"],
     ['{"environments":"write"}', "may not be write"],
+    ['{"workflows":"write"}', "may not be write"],
     ['{"contents":"admin"}', "read or write"],
     ['["contents"]', "JSON object"],
     ['{"Bad-Name":"read"}', "bad permission name"],
   ])("rejects %s", (raw, message) => {
     expect(() => parseMaxPermissions(raw)).toThrow(message);
+  });
+});
+
+describe("deployment settings", () => {
+  test("DEFAULT_ACCESS accepts read or ceiling only", () => {
+    expect(parseDefaultAccess(undefined)).toBe("read");
+    expect(parseDefaultAccess("ceiling")).toBe("ceiling");
+    expect(() => parseDefaultAccess("write")).toThrow("read or ceiling");
+  });
+
+  test("the audit hash matches GitHub's base64 hashed_token form", async () => {
+    // printf abc | openssl dgst -sha256 -binary | base64
+    expect(await sha256Base64("abc")).toBe("ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
   });
 });
 

@@ -20,7 +20,7 @@ function flag(name: string): string | undefined {
 
 const ORG = flag("org");
 const BROKER_FLAG = flag("broker");
-const APP_NAME = flag("name") ?? `${ORG}-agents`;
+const APP_NAME = flag("name") ?? "";
 const PORT = Number(flag("port") ?? "47811");
 if (!ORG || !/^[A-Za-z0-9-]+$/.test(ORG) || !BROKER_FLAG) {
   console.error("usage: bun scripts/create-app.ts --org <org> --broker https://<your broker> [--name <app name>] [--actions-write]");
@@ -32,30 +32,22 @@ const BROKER = brokerUrl.origin;
 const WORKER_DIR = join(import.meta.dir, "..", "worker");
 const state = randomBytes(16).toString("hex");
 
-// What the installation may grant. Minted tokens are narrowed further by the
-// broker's MAX_PERMISSIONS. `members: read` lets the broker check team
-// membership; it is never handed to agents.
-const manifest = {
-  name: APP_NAME,
-  url: `https://github.com/${ORG}`,
-  description: `Identity for ${ORG}'s AI agents. One-hour tokens are minted per agent session by the team's own broker.`,
-  public: false,
-  redirect_url: `http://127.0.0.1:${PORT}/callback`,
-  callback_urls: [`${BROKER}/v1/login/callback`],
-  hook_attributes: { url: `${BROKER}/webhook`, active: false },
-  request_oauth_on_install: false,
-  default_events: [],
-  default_permissions: {
-    contents: "write",
-    pull_requests: "write",
-    issues: "write",
-    actions: process.argv.includes("--actions-write") ? "write" : "read",
-    checks: "read",
-    statuses: "read",
-    metadata: "read",
-    members: "read",
-  },
-};
+// What the installation may grant comes from app-manifest.json, committed so
+// permission changes are reviewed (each one makes every installer re-approve).
+// Minted tokens are narrowed further by the broker's MAX_PERMISSIONS.
+// `members: read` lets the broker check team membership; agents never get it.
+function loadManifest(): Record<string, any> {
+  const fill = (text: string) =>
+    text
+      .replaceAll("{org}", ORG!)
+      .replaceAll("{broker}", BROKER)
+      .replaceAll("{port}", String(PORT));
+  const manifest = JSON.parse(fill(readFileSync(join(import.meta.dir, "..", "app-manifest.json"), "utf8")));
+  if (flag("name")) manifest.name = APP_NAME;
+  if (process.argv.includes("--actions-write")) manifest.default_permissions.actions = "write";
+  return manifest;
+}
+const manifest = loadManifest();
 
 async function wrangler(args: string[], stdin?: string): Promise<void> {
   const proc = Bun.spawn(["wrangler", ...args], {
@@ -93,7 +85,7 @@ const server = Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/") {
-      return html(`<p>Sending the ${escape(APP_NAME)} manifest to GitHub…</p>
+      return html(`<p>Sending the ${escape(manifest.name)} manifest to GitHub…</p>
 <form id="f" method="post" action="https://github.com/organizations/${ORG}/settings/apps/new?state=${state}">
 <input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}">
 <button>Continue to GitHub</button></form><script>document.getElementById("f").submit()</script>`);

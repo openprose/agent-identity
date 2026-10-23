@@ -52,11 +52,17 @@ session. A login link sent to someone else cannot deliver a session to the
 person who started it, and no GitHub user token is ever stored.
 
 **Minting.** `agent-identity token --repo api` asks the broker for a token for
-`your-org/api`. The broker checks the session and team membership (cached five
-minutes), validates the request, caps the permissions at both `MAX_PERMISSIONS`
-and what the installation was granted, mints an installation token with the App
-JWT, logs it, and returns it. The CLI caches it until ten minutes before expiry.
-Mints are rate-limited per session, and login starts per IP.
+`your-org/api`. Tokens are **read-only unless writes are asked for**
+(`--write` for the deployment's ceiling, or `--perm contents=write`); the `gh`
+shim asks for writes only when a command writes. The broker checks the session
+and team membership (cached five minutes), validates the request, caps the
+permissions at both `MAX_PERMISSIONS` and what the installation was granted,
+mints an installation token with the App JWT, and records it. The audit write
+fails closed: if it cannot be stored, the token is revoked at GitHub and never
+returned. Records carry the token's sha256 in hex and in base64, the form
+GitHub's audit log uses for `hashed_token`. The CLI caches a token until ten
+minutes before expiry; `logout` and `revoke-all` revoke cached tokens at
+GitHub. Mints are rate-limited per session, and login starts per IP.
 
 **Agent shells.** `agent-env/install.sh` sources `agent-env.sh` from your shell
 startup files. In a shell where a configured variable marks an agent (for
@@ -91,8 +97,10 @@ agents only *read* with your login (writes and `gh auth token` are refused), or
 `deny` to keep agent shells off your login entirely. `read` judges commands by
 name (`list`, `view`, a GET request, an inline GraphQL query); a `gh` extension
 with a `list` subcommand runs its own code with your login, so prefer `deny`
-where agents need nothing personal. An exported `GH_TOKEN` or
-`GITHUB_TOKEN` makes the shim step aside.
+where agents need nothing personal. A `GH_TOKEN` or `GITHUB_TOKEN` inherited
+from the environment is ignored for your org's repositories (the bot is used)
+and kept for everything else; `AGENT_IDENTITY_RESPECT_GH_TOKEN=1` makes the
+shim step aside whenever one is set.
 
 ## Set up
 
@@ -132,7 +140,8 @@ calls it as a credential helper). You need to be an owner of the GitHub org.
 | Setting | Where | Meaning |
 | --- | --- | --- |
 | `GITHUB_ORG`, `GITHUB_TEAM` | `worker/wrangler.toml` `[vars]` | The org, and the team (slug) whose members may log in. |
-| `MAX_PERMISSIONS` | `worker/wrangler.toml` `[vars]` | JSON cap on minted permissions. Default: `contents`, `pull_requests`, `issues` write; `actions`, `checks`, `statuses` read. Repository and org administration, members, secrets, environments and Actions variables can never be write (`NEVER_WRITE` in `worker/src/lib.ts`). |
+| `MAX_PERMISSIONS` | `worker/wrangler.toml` `[vars]` | JSON cap on minted permissions. Default: `contents`, `pull_requests`, `issues` write; `actions`, `checks`, `statuses` read. Workflows, repository and org administration, members, secrets, environments and Actions variables can never be write (`NEVER_WRITE` in `worker/src/lib.ts`); a cap naming one is refused, and `GET /version` reports it. |
+| `DEFAULT_ACCESS` | `worker/wrangler.toml` `[vars]` | `read` (default): a request naming no permissions gets a read-only token. `ceiling`: it gets the full cap, which CLIs older than 0.2.0 expect; use only while upgrading them. |
 | `APP_PRIVATE_KEY`, `APP_CLIENT_SECRET` | Worker secrets | Set by `create-app.ts`. Never committed. |
 | `AGENT_IDENTITY_DETECT` | `~/.config/agent-identity/env.sh` | Variables whose presence marks an agent shell. Add your orchestrator's session variable here. |
 | `AGENT_IDENTITY_LABEL_VARS` | same | Variables naming the agent session; the first one set labels each token. |
@@ -142,41 +151,37 @@ calls it as a credential helper). You need to be an owner of the GitHub org.
 ## Use
 
 ```sh
-agent-identity token --repo api            # print a token (cached until 10 minutes before expiry)
-agent-identity token --repo api --perm contents=read
-eval "$(agent-identity env)"               # GH_TOKEN plus bot git identity for this checkout's repo
+agent-identity token --repo api            # read-only token (cached until 10 minutes before expiry)
+agent-identity token --repo api --write    # the deployment's full ceiling
+agent-identity token --repo api --perm contents=write
+eval "$(agent-identity env --write)"       # GH_TOKEN plus bot git identity for this checkout's repo
+agent-identity trailers                    # Co-authored-by (you) and Agent-Session lines for commits
+agent-identity doctor                      # broker, versions, configuration and shell wiring
 agent-identity audit --sha <sha256>        # which session minted a token
 agent-identity sessions | revoke-all | logout
 ```
 
+Commits are authored by the bot. To keep the human and the session on record,
+add the output of `agent-identity trailers` to commit messages (for example
+from your agent's commit instructions, or a `prepare-commit-msg` hook in repos
+that allow one):
+
+```text
+Co-authored-by: <your-login> <<id>+<your-login>@users.noreply.github.com>
+Agent-Session: <session label>
+```
+
 ## Keeping your instance up to date
 
-GitHub's **Use this template** button copies the template once; it does not
-sync afterwards. Make your instance a new **private** repository, not a GitHub
-fork: a fork of a public repository is public. To keep taking improvements:
-
-- **Keep all your values in instance-only files.** Your instance should differ
-  from the template only in `worker/wrangler.toml` (org, team, App ids, Worker
-  name, KV id; no secrets) and, if you like, an `INSTANCE.md`. The template
-  never contains those files, so merges never conflict on them. Put code
-  changes in the template (or your fork of it), not in the instance.
-- **Track the template as `upstream`.**
-  - *Recommended:* create your instance by cloning the template and pushing it
-    to a new private repository. History is shared, so updates are ordinary
-    merges:
-    ```sh
-    git clone <template URL> my-agent-identity && cd my-agent-identity
-    git remote rename origin upstream
-    git remote add origin <your private repo URL> && git push -u origin main
-    # later:
-    git fetch upstream && git merge upstream/main
-    ```
-  - *If you used the button:* add the remote and merge once with
-    `git merge --allow-unrelated-histories upstream/main`, resolving conflicts
-    in favour of the template; later merges are ordinary.
-- **Check for drift.** `scripts/upstream-diff.sh` lists template commits you
-  have not merged and fails if any file other than the instance-only ones
-  differs from the template.
+GitHub's **Use this template** button copies the template once and never syncs.
+Keep your instance a separate **private** repository (never a GitHub fork: a
+fork of a public repository is public), keep your values in the instance-only
+`worker/wrangler.toml`, track the template as an `upstream` remote, and merge
+tagged releases. [UPGRADING.md](UPGRADING.md) has the exact commands, including
+the first merge for instances made with the button; `scripts/upstream-diff.sh`
+checks that only instance files differ from the release you merged, and
+[CHANGELOG.md](CHANGELOG.md) marks releases that need configuration changes or
+App re-approval.
 
 ## Prior art, and how this differs
 
@@ -186,14 +191,38 @@ fork: a fork of a public repository is public. To keep taking improvements:
   policies stored in each repository. It is the right tool when the caller
   already has an OIDC identity. A laptop agent session does not, so this
   template uses a team-gated human login instead.
+- **[GATE](https://github.com/thomsonreuters/gate)** (Thomson Reuters) is a
+  self-hosted Go service in the same OIDC family. Callers must present required
+  claims and must not carry forbidden ones. Tokens last 15 minutes, a background
+  loop revokes them, and each grant is a central ceiling intersected with a
+  per-repository trust policy. It audits what was requested against what was
+  granted.
+- **[gh-token-broker](https://github.com/abinnovision/gh-token-broker)** is a
+  Go security token service (RFC 8693 token exchange) that swaps a GitHub
+  Actions workflow's OIDC token for an App installation token. CEL policies
+  decide which repositories and permissions it gets.
 - **[octobroker](https://github.com/openabdev/octobroker)** is a GitHub gateway
   for AI agents that runs on Kubernetes or ECS. Agents hold a broker API key;
   the broker enforces per-agent tool and repository policy, proxies GitHub's
   MCP server, REST and git, and mints repo-scoped App tokens. It is a fuller
-  policy gateway, with infrastructure to run.
+  policy gateway, with infrastructure to run, and it writes its audit record
+  before forwarding a request.
+- **[unyolo](https://github.com/osolmaz/unyolo)** runs broker daemons so the
+  agent never holds a token at all. Rules on the client, the operation, the
+  target and the ref decide whether each request is allowed, denied, or sent
+  to a human for approval.
+- **[git-repo-auth-mcp](https://github.com/klappy/git-repo-auth-mcp)** is a
+  Cloudflare Worker MCP server. After a one-time GitHub login, an agent calls
+  one tool to get an installation token that lasts at most one hour and can be
+  narrowed per request. It can be self-hosted or used as a hosted service.
 - **[ghapp-cli](https://github.com/operator-kit/ghapp-cli)** gives agents an App
   identity for `git` and `gh` on one machine. The App's private key is
   configured on that machine.
+- **[GitLab composite identity](https://docs.gitlab.com/user/duo_agent_platform/composite_identity/)**
+  is a concept rather than a tool: an agent's effective permission is the
+  lower of its service account's and the human who triggered it. Here, the
+  bot's permissions are capped by the broker and only team members can obtain
+  them, but they are not intersected with each person's own access.
 
 This template differs in that:
 
@@ -205,7 +234,12 @@ This template differs in that:
 - **routing is transparent and per shell:** agents keep using plain `git` and
   `gh`, and only agent shells are affected;
 - **every token carries per-session provenance**, kept in the broker's audit
-  log.
+  log;
+- **the agent holds a bearer token.** Unlike proxy designs (octobroker,
+  unyolo, hosted agent git proxies), nothing sits between the agent and
+  GitHub to inspect each request. A token is limited to one hour, named
+  repositories and capped permissions, but within those limits your branch
+  rulesets are the gate (see "Limits and residual risk").
 
 ## Limits and residual risk
 
@@ -243,15 +277,24 @@ Read this before relying on it.
   Cloudflare KV, which is eventually consistent: a logout, `revoke-all` or
   team removal can take about a minute to apply everywhere, and the
   membership cache is five minutes. Tokens already minted stay valid until they
-  expire (one hour) unless revoked at GitHub.
+  expire (one hour) unless revoked at GitHub; `logout` and `revoke-all`
+  revoke the tokens cached on that machine, but not copies an agent made.
 - **Branch protection is your real gate.** A token with `contents: write` can
   push any branch that rules do not protect. Protect your default and release
   branches with rulesets that do **not** list the App as a bypass actor. If you
   deliberately let agents push a release branch, keep force-push, deletion and
   required-CI rules in a separate ruleset that nobody can bypass.
-- **Workflows and Actions.** Pushes by App tokens trigger workflows. Do not
-  grant `workflows` write unless agents must edit `.github/workflows`, and
-  keep deployment secrets in environments with branch restrictions.
+- **Workflows and Actions.** Pushes by App tokens trigger workflows, so keep
+  deployment secrets in environments with branch restrictions. The broker never
+  grants `workflows` write, so agents cannot edit `.github/workflows`; if your
+  team needs that, change `NEVER_WRITE` deliberately in your fork of the
+  template, not in configuration.
+- **Cloudflare KV write limits.** Every mint writes at least two audit records,
+  and the audit fails closed: once the account's KV write quota is exhausted
+  (the free plan allows 1,000 writes a day), every mint returns 503 until it
+  resets. Use a paid Workers plan for a team.
+- **`GET /version` and `GET /health` are public.** They reveal the template
+  version, the org, the App name and the permission cap, never secrets.
 - **Some harnesses reset `PATH`** after shell startup files run, which hides
   the `gh` shim while the git half (environment variables) still applies.
   Check `command -v gh` inside your agent shells. If it is wrong, put the shim
@@ -269,3 +312,7 @@ Read this before relying on it.
 bun test            # broker validation, JWT signing, agent-env detection, gh shim routing
 bun run typecheck
 ```
+
+See also [THREAT_MODEL.md](THREAT_MODEL.md) (every trusted party),
+[SECURITY.md](SECURITY.md), [UPGRADING.md](UPGRADING.md) and
+[CHANGELOG.md](CHANGELOG.md).

@@ -15,8 +15,11 @@ export const DEFAULT_MAX_PERMISSIONS: PermissionSet = {
 };
 
 // Permissions that may never be granted write access through the broker,
-// whatever MAX_PERMISSIONS says. Read access to them is allowed if configured.
+// whatever MAX_PERMISSIONS says; a ceiling naming one fails every mint and
+// is reported by GET /version.
+// Read access to them is allowed if configured.
 export const NEVER_WRITE = [
+  "workflows",
   "administration",
   "members",
   "organization_administration",
@@ -51,9 +54,25 @@ const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
 export type PermissionSet = Record<string, "read" | "write">;
 
+// What a request gets when it names no permissions: "read" (the ceiling with
+// every permission lowered to read) unless the deployment says "ceiling".
+export type DefaultAccess = "read" | "ceiling";
+
+export function parseDefaultAccess(raw: string | undefined): DefaultAccess {
+  if (raw === undefined || raw === "" || raw === "read") return "read";
+  if (raw === "ceiling") return "ceiling";
+  throw new Error("DEFAULT_ACCESS must be read or ceiling");
+}
+
+export function readOnly(permissions: PermissionSet): PermissionSet {
+  return Object.fromEntries(Object.keys(permissions).map((name) => [name, "read"])) as PermissionSet;
+}
+
 export type MintRequest = {
   repositories?: string[];
   permissions?: PermissionSet;
+  // "write" asks for the full ceiling; "read" (the default) for its read-only form.
+  access?: "read" | "write";
   label?: string;
 };
 
@@ -66,13 +85,14 @@ export type ValidatedMint = {
 export function validateMintRequest(
   body: unknown,
   maxPermissions: PermissionSet = DEFAULT_MAX_PERMISSIONS,
+  defaultAccess: DefaultAccess = "read",
 ): ValidatedMint | { error: string } {
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { error: "body must be a JSON object" };
   }
   const req = body as Record<string, unknown>;
   for (const key of Object.keys(req)) {
-    if (!["repositories", "permissions", "label"].includes(key)) {
+    if (!["repositories", "permissions", "access", "label"].includes(key)) {
       return { error: `unknown field: ${key}` };
     }
   }
@@ -98,7 +118,16 @@ export function validateMintRequest(
     repositories = [...new Set(req.repositories as string[])].sort();
   }
 
-  let permissions: PermissionSet = { ...maxPermissions };
+  // Writes are asked for, never assumed: no permissions and no access means
+  // read-only, unless this deployment keeps the old "ceiling" default.
+  if (req.access !== undefined && req.access !== "read" && req.access !== "write") {
+    return { error: "access must be read or write" };
+  }
+  if (req.access !== undefined && req.permissions !== undefined) {
+    return { error: "send access or permissions, not both" };
+  }
+  const wantsCeiling = req.access === "write" || (req.access === undefined && defaultAccess === "ceiling");
+  let permissions: PermissionSet = wantsCeiling ? { ...maxPermissions } : readOnly(maxPermissions);
   if (req.permissions !== undefined) {
     if (req.permissions === null || typeof req.permissions !== "object" || Array.isArray(req.permissions)) {
       return { error: "permissions must be an object like {\"contents\": \"read\"}" };
@@ -142,6 +171,14 @@ export function randomToken(prefix: string, bytes = 32): string {
 export async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// GitHub's audit log records `hashed_token` as base64(SHA-256(token)).
+export async function sha256Base64(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  let binary = "";
+  for (const b of new Uint8Array(digest)) binary += String.fromCharCode(b);
+  return btoa(binary);
 }
 
 export function timingSafeEqual(a: string, b: string): boolean {

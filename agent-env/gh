@@ -13,7 +13,9 @@
 #                                     writes are always refused (default: refuse)
 #   AGENT_IDENTITY_DEBUG=1            say on stderr which identity is used
 #
-# An exported GH_TOKEN or GITHUB_TOKEN wins: the shim then steps aside.
+# An inherited GH_TOKEN/GITHUB_TOKEN is ignored for org targets (the bot is
+# used) and kept for everything else; AGENT_IDENTITY_RESPECT_GH_TOKEN=1 makes
+# the shim step aside whenever one is set.
 
 # The real gh is the first gh on PATH outside this shim's directory. Compare
 # resolved paths so a symlinked PATH entry cannot make the shim call itself.
@@ -32,19 +34,36 @@ for entry in "${path_entries[@]}"; do
 done
 [ -n "$next" ] || { echo "agent-identity gh shim: no gh found on PATH" >&2; exit 127; }
 
-if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -z "$AGENT_IDENTITY_AGENT" ]; then
-  if [ -n "$AGENT_IDENTITY_AGENT" ] && [ -n "$AGENT_IDENTITY_DEBUG" ]; then
-    echo "agent-identity: GH_TOKEN/GITHUB_TOKEN is set; the shim steps aside and gh uses it." >&2
+[ -n "$AGENT_IDENTITY_AGENT" ] || exec "$next" "$@"
+
+# A GH_TOKEN/GITHUB_TOKEN inherited from the environment must not let an agent
+# act on your org's repositories as someone else: for org targets the shim
+# ignores it and uses the bot. Other targets still get it. The shim's own
+# token (nested gh calls, e.g. extensions) passes straight through.
+inherited_gh_token=""
+inherited_github_token=""
+if [ -n "$GH_TOKEN$GITHUB_TOKEN" ]; then
+  if [ "$AGENT_IDENTITY_SHIM_TOKEN" = 1 ] || [ "$AGENT_IDENTITY_RESPECT_GH_TOKEN" = 1 ]; then
+    exec "$next" "$@"
   fi
-  exec "$next" "$@"
+  inherited_gh_token=$GH_TOKEN
+  inherited_github_token=$GITHUB_TOKEN
+  unset GH_TOKEN GITHUB_TOKEN
 fi
+
+# Run the real gh without the bot: with any inherited token restored.
+run_unrouted() {
+  [ -n "$inherited_gh_token" ] && export GH_TOKEN=$inherited_gh_token
+  [ -n "$inherited_github_token" ] && export GITHUB_TOKEN=$inherited_github_token
+  exec "$next" "$@"
+}
 
 org=${AGENT_IDENTITY_ORG:-}
 if [ -z "$org" ]; then
   session="${XDG_CONFIG_HOME:-$HOME/.config}/agent-identity/session.json"
   [ -f "$session" ] && org=$(jq -r '.org // empty' "$session" 2>/dev/null)
 fi
-[ -n "$org" ] || exec "$next" "$@"
+[ -n "$org" ] || run_unrouted "$@"
 
 lower() { printf %s "$1" | tr '[:upper:]' '[:lower:]'; }
 org_lc=$(lower "$org")
@@ -87,7 +106,7 @@ refuse() {
 #   deny             refuse everything that would use the personal login
 personal() {
   case "${AGENT_IDENTITY_PERSONAL:-allow}" in
-    allow) exec "$next" "$@" ;;
+    allow) run_unrouted "$@" ;;
     deny) refuse "AGENT_IDENTITY_PERSONAL=deny: agent shells never use the personal login" ;;
   esac
   local readonly_cmd=""
@@ -105,7 +124,7 @@ personal() {
     auth) [ "$2" = status ] && readonly_cmd=1 ;;
     *) case "$2" in list|view|status|diff|checks|watch|download|browse|log) readonly_cmd=1 ;; esac ;;
   esac
-  [ -n "$readonly_cmd" ] && exec "$next" "$@"
+  [ -n "$readonly_cmd" ] && run_unrouted "$@"
   refuse "AGENT_IDENTITY_PERSONAL=read: only read-only commands may use the personal login"
 }
 
@@ -137,7 +156,7 @@ if [ "$1" = "auth" ]; then
     token|git-credential) repo=$(origin_repo) ;;
   esac
   [ -n "$repo" ] || personal "$@"
-  token=$(agent-identity token --repo "$repo") || exit 1
+  token=$(agent-identity token --repo "$repo" --write) || exit 1
   if [ "$2" = token ]; then printf '%s\n' "$token"; exit 0; fi
   [ "$3" = get ] || exit 0
   host=$(sed -n 's/^host=//p')
@@ -215,10 +234,26 @@ if [ "$1" = api ]; then
   esac
 fi
 
+# Tokens are read-only unless the command writes.
+access=""
+if [ "$1" = api ]; then
+  if [ "$method" != GET ] && ! { [[ " $* " == *" graphql "* ]] && [[ " $* " != *mutation* ]] && [[ " $* " != *"=@"* ]] && [[ " $* " != *" --input "* ]]; }; then
+    access=--write
+  fi
+else
+  case "$2" in
+    list|view|status|diff|checks|watch|download|browse|log|clone) ;;
+    *) access=--write ;;
+  esac
+fi
+
 # A watch can outlive a cached token; start it with a full hour.
 fresh=""
 [ "$1 $2" = "run watch" ] && fresh=--fresh
-minted=$(agent-identity token --repo "$repo" $fresh --json) || {
+if [ -n "$inherited_gh_token$inherited_github_token" ] && [ -n "$AGENT_IDENTITY_DEBUG" ]; then
+  echo "agent-identity: ignoring the inherited GH_TOKEN/GITHUB_TOKEN for $org/$repo" >&2
+fi
+minted=$(agent-identity token --repo "$repo" $fresh $access --json) || {
   echo "agent-identity: no bot token for $org/$repo; not falling back to the personal login." >&2
   echo "agent-identity: run \`agent-identity login\` (as the human) or check the error above." >&2
   exit 1
@@ -230,11 +265,11 @@ if [ -n "$need" ]; then
     # Anything that writes is always refused.
     if [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${need##*:}" = read ] && [ "$method" = GET ]; then
       echo "agent-identity: the bot lacks ${need}; this read-only gh command uses the personal login." >&2
-      exec "$next" "$@"
+      run_unrouted "$@"
     fi
     refuse "the bot token lacks ${need}"
   fi
 fi
 token=$(printf %s "$minted" | jq -r .token)
 [ -n "$AGENT_IDENTITY_DEBUG" ] && echo "agent-identity: gh as the bot for $org/$repo" >&2
-GH_TOKEN=$token exec "$next" "$@"
+GH_TOKEN=$token AGENT_IDENTITY_SHIM_TOKEN=1 exec "$next" "$@"

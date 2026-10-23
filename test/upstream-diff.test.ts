@@ -46,5 +46,5 @@ test("an instance passes with config only, and fails once code drifts", () => {
 
   appendFileSync(join(template, "README.md"), "upstream change\n");
   git(template, "commit", "-qam", "upstream");
-  expect(diff(instance).out).toContain("template commits not yet merged: 1");
+  expect(diff(instance).out).toContain("not yet merged: 1");
 });
