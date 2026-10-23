@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Test
+        run: bun test
+      - name: Typecheck
+        run: bunx --no-install tsc --noEmit -p tsconfig.json
+      - name: Shellcheck (errors)
+        run: |
+          shellcheck -S error agent-env/gh agent-env/install.sh scripts/upstream-diff.sh
+          shellcheck -S error -s sh agent-env/agent-env.sh
+      - name: Workflow audit (zizmor)
+        run: pipx run zizmor==1.31.1 --persona=regular .github/workflows

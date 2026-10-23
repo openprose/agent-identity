@@ -327,8 +327,12 @@ Read this before relying on it.
 
 ## Develop
 
+Releases are tagged `vX.Y.Z`, immutable, and carry a GitHub-signed release
+attestation: check one with `gh release verify vX.Y.Z -R <this repository>`
+before merging it into your instance.
+
 ```sh
-bun test            # broker validation, JWT signing, agent-env detection, gh shim routing
+bun test            # broker, CLI, installer, agent-env detection and gh shim routing
 bun run typecheck
 ```
 

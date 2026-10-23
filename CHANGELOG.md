@@ -5,6 +5,15 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.3.0
+
+First public release.
+
+- CI: tests, typecheck, shellcheck and a zizmor workflow audit on every push,
+  pull request and tag. Actions are pinned by commit.
+- Releases are immutable, with GitHub-signed release attestations
+  (`gh release verify <tag>`).
+
 ## 0.2.9
 
 - The git credential helper answers `quit=1` for org repositories even when an
