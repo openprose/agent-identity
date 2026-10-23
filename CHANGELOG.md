@@ -5,6 +5,36 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.7
+
+Fixes from an adversarial pre-publication review.
+
+- **Breaking:** `AGENT_IDENTITY_PERSONAL` defaults to `read`: agent shells may
+  only read with your personal login. Set `allow` in `env.sh` to keep the old
+  behaviour.
+- **Breaking:** an allowlist replaces the never-write list. Only `contents`,
+  `pull_requests`, `issues`, `actions`, `checks`, `statuses`, `deployments`,
+  `pages` and `discussions` can be write; a `MAX_PERMISSIONS` asking write on
+  anything else fails every mint.
+- The `gh` shim resolves every spelling of an org repository (`-R=`, any letter
+  case, `www.`/`api.` hosts, `git@`/`ssh://` forms, `{owner}`/`{repo}`
+  placeholders, `GH_REPO`, any remote) and refuses org references it cannot
+  resolve, instead of using the personal login.
+- Attached-value flags (`-fkey=v`, `--field=k=v`, `--input=file`) count as
+  writes; GraphQL bodies read from files count as possible mutations.
+- git: the broker answers first for every github.com credential (your other
+  helpers stay behind it); `www.` and more SSH spellings of org remotes are
+  rewritten; the git include is appended after existing `GIT_CONFIG_*` entries.
+- Login uses PKCE. Mint rate limits are per person. A missing team is a
+  configuration error, not a removal. The internal members token is checked to
+  carry nothing else, and an empty permission set is never sent to GitHub.
+- The broker re-resolves the installation id after a reinstall.
+- `install.sh --uninstall`; Codex shells (`CODEX_THREAD_ID`) detected by
+  default; Git LFS paths; unknown CLI options are errors; `create-app.ts`
+  checks `worker/wrangler.toml` first and explains recovery; the manifest no
+  longer names a webhook URL.
+- Tests for the broker (login, minting, audit, sessions) and the installer.
+
 ## 0.2.6
 
 - `AGENT_IDENTITY_PERSONAL=deny` now also overrides `AGENT_IDENTITY_FALLBACK=personal`.
@@ -22,7 +52,7 @@ change.
 
 - With `AGENT_IDENTITY_FALLBACK=personal`, `gh api` reads of rulesets use the
   personal login: GitHub returns ruleset bypass actors only to repository
-  admins, never to an App, so release checks that verify bypass lists need it.
+  admins, never to an App, so checks that verify bypass lists need it.
 
 ## 0.2.2
 

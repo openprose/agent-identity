@@ -11,6 +11,9 @@ const root = mkdtempSync(join(tmpdir(), "gh-shim-"));
 const shimDir = join(root, "shim");
 const fakeDir = join(root, "fake");
 const checkout = join(root, "checkout");
+const sshCheckout = join(root, "ssh-checkout");
+const forkCheckout = join(root, "fork-checkout");
+const aliasCheckout = join(root, "alias-checkout");
 
 beforeAll(() => {
   mkdirSync(shimDir);
@@ -35,6 +38,15 @@ else printf '%s-%s\\n' "$kind" "$repo"; fi
   chmodSync(join(fakeDir, "agent-identity"), 0o755);
   Bun.spawnSync(["git", "init", "-q"], { cwd: checkout });
   Bun.spawnSync(["git", "remote", "add", "origin", "git@github.com:MyOrg/widgets.git"], { cwd: checkout });
+  for (const [dir, remotes] of [
+    [sshCheckout, [["origin", "ssh://git@GitHub.com:22/MyOrg/widgets.git"]]],
+    [forkCheckout, [["origin", "https://github.com/someone/widgets.git"], ["upstream", "https://github.com/myorg/widgets.git"]]],
+    [aliasCheckout, [["origin", "git@github-work:myorg/widgets.git"]]],
+  ] as const) {
+    mkdirSync(dir);
+    Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+    for (const [name, url] of remotes) Bun.spawnSync(["git", "remote", "add", name, url], { cwd: dir });
+  }
 });
 
 function gh(args: string[], env: Record<string, string> = {}, cwd = root) {
@@ -145,7 +157,63 @@ describe("routing", () => {
 
   test("gh auth token returns the bot token inside an org checkout only", () => {
     expect(gh(["auth", "token"], {}, checkout).out).toBe("botw-widgets");
-    expect(gh(["auth", "token"]).out).toStartWith("token=personal ");
+    // Outside one it would print the personal token: refused by default.
+    expect(gh(["auth", "token"]).code).toBe(1);
+    expect(gh(["auth", "token"], { AGENT_IDENTITY_PERSONAL: "allow" }).out).toStartWith("token=personal ");
+  });
+});
+
+describe("org writes never reach the personal login (any spelling)", () => {
+  const allow = { AGENT_IDENTITY_PERSONAL: "allow" };
+  test.each([
+    [["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/1/merge"], checkout, "botw-widgets"],
+    [["api", "-X", "PUT", "repos/:owner/:repo/pulls/1/merge"], checkout, "botw-widgets"],
+    [["pr", "merge", "1", "-R", "git@github.com:myorg/x"], root, "botw-x"],
+    [["pr", "merge", "1", "-R", "ssh://git@github.com/myorg/x"], root, "botw-x"],
+    [["pr", "merge", "1", "-R", "GITHUB.COM/myorg/x"], root, "botw-x"],
+    [["pr", "merge", "1", "-R", "www.github.com/myorg/x"], root, "botw-x"],
+    [["pr", "merge", "1", "-R", "HTTPS://GitHub.com/MyOrg/x.git"], root, "botw-x"],
+    [["pr", "merge", "1", "-R=myorg/x"], root, "botw-x"],
+    [["pr", "merge", "https://www.github.com/myorg/x/pull/1"], root, "botw-x"],
+    [["api", "-X", "POST", "https://API.github.com/repos/myorg/x/issues"], root, "botw-x"],
+    [["pr", "merge", "1"], sshCheckout, "botw-widgets"],
+    [["pr", "merge", "1"], forkCheckout, "botw-widgets"],
+    [["pr", "merge", "1"], aliasCheckout, "botw-widgets"],
+  ])("%j in %s uses the bot", (args, cwd, token) => {
+    expect(gh(args as string[], allow, cwd as string).out).toStartWith(`token=${token} `);
+  });
+
+  test("GH_REPO names the repository when nothing else does", () => {
+    expect(gh(["pr", "merge", "1"], { ...allow, GH_REPO: "myorg/x" }).out).toStartWith("token=botw-x ");
+    expect(gh(["pr", "merge", "1"], { ...allow, GH_REPO: "someone/x" }).out).toStartWith("token=personal ");
+  });
+
+  test("an org reference that cannot be resolved to github.com is refused", () => {
+    for (const repo of ["git@github-work:myorg/x", "myorg", "https://example.com/myorg/x"]) {
+      const result = gh(["pr", "merge", "1", "-R", repo], allow);
+      expect(result.code, repo).toBe(1);
+      expect(result.out).toBe("");
+    }
+  });
+});
+
+describe("attached-value flags count as writes", () => {
+  const read = { AGENT_IDENTITY_PERSONAL: "read" };
+  test.each([
+    [["api", "user/keys", "-fkey=ssh-ed25519 AAAA"]],
+    [["api", "user/keys", "--raw-field=key=x"]],
+    [["api", "user/emails", "-Femails[]=a@example.com"]],
+    [["api", "graphql", "--input=mutation.json"]],
+  ])("%j is refused on the personal login under read", (args) => {
+    const result = gh(args as string[], read);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe("");
+  });
+
+  test("an org-level write with attached fields is refused outright", () => {
+    const result = gh(["api", "orgs/myorg/invitations", "-finvitee_id=1", "-frole=admin"], { AGENT_IDENTITY_PERSONAL: "allow" });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("org-level writes");
   });
 });
 

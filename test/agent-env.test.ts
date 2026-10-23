@@ -37,6 +37,14 @@ describe.each(shells)("agent-env.sh under %s", (shell) => {
     expect(run(shell, { CLAUDECODE: "1", AGENT_IDENTITY_DISABLE: "1" }).agent).toBe("no");
   });
 
+  test("the git include is appended after existing GIT_CONFIG entries, once", () => {
+    const proc = Bun.spawnSync(
+      [shell, "-c", `. "${script}"; . "${script}"; printf '%s|%s|%s|%s' "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_KEY_1" "\${GIT_CONFIG_VALUE_1##*/}"`],
+      { env: { HOME: home, PATH: "/usr/bin:/bin", CLAUDECODE: "1", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.harness", GIT_CONFIG_VALUE_0: "x" } },
+    );
+    expect(proc.stdout.toString()).toBe("2|core.harness|include.path|agent.gitconfig");
+  });
+
   test("a detection list with shell syntax falls back to the defaults, never evaluated", () => {
     const marker = join(home, "pwned");
     const result = run(shell, { AGENT_IDENTITY_DETECT: `X;touch ${marker}`, CLAUDECODE: "1" });

@@ -7,7 +7,7 @@
 //   agent-identity git-credential get                   git credential helper (your org only)
 //   agent-identity trailers                             commit trailers naming the human and session
 //   agent-identity doctor                               check the broker, versions and wiring
-//   agent-identity config                               print org, app and broker
+//   agent-identity config | bot                         print org, app and broker | the bot's git identity
 //   agent-identity whoami | sessions | revoke-all | logout | audit [--sha HEX]
 //
 // Tokens are read-only unless you pass --write (the deployment's ceiling) or
@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 const NAME = "agent-identity";
-const CLI_VERSION = "0.2.6";
+const CLI_VERSION = "0.2.7";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), NAME);
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), NAME);
 const SESSION_FILE = join(CONFIG_DIR, "session.json");
@@ -136,7 +136,8 @@ function parseArgs(argv: string[]): Args {
       args.perms[name] = level;
     } else if (arg === "--label") args.label = next();
     else if (["--device", "--sha", "--limit", "--broker"].includes(arg)) args.values[arg.slice(2)] = next();
-    else if (arg.startsWith("--")) args.flags.add(arg.slice(2));
+    else if (["--write", "--fresh", "--json"].includes(arg)) args.flags.add(arg.slice(2));
+    else if (arg.startsWith("-")) die(`unknown option: ${arg}`);
     else die(`unexpected argument: ${arg}`);
   }
   return args;
@@ -273,7 +274,10 @@ async function gitCredential(operation: string | undefined): Promise<void> {
     process.stderr.write(`${NAME}: not logged in; run \`${NAME} login --broker URL\`\n`);
     return;
   }
-  const [owner, repo] = (input.path ?? "").replace(/\.git$/, "").split("/");
+  // The path is owner/repo(.git)(/more, as for Git LFS); the repository is
+  // the second segment without .git.
+  const [owner, rawRepo = ""] = (input.path ?? "").split("/");
+  const repo = rawRepo.replace(/\.git$/, "");
   if (!owner || owner.toLowerCase() !== session.org.toLowerCase() || !repo) {
     if (!input.path) process.stderr.write(`${NAME}: set credential.useHttpPath=true for github.com/${session.org}\n`);
     return; // fall through to the next helper

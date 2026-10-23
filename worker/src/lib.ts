@@ -14,20 +14,22 @@ export const DEFAULT_MAX_PERMISSIONS: PermissionSet = {
   metadata: "read",
 };
 
-// Permissions that may never be granted write access through the broker,
-// whatever MAX_PERMISSIONS says; a ceiling naming one fails every mint and
-// is reported by GET /version.
-// Read access to them is allowed if configured.
-export const NEVER_WRITE = [
-  "workflows",
-  "administration",
-  "members",
-  "organization_administration",
-  "secrets",
-  "organization_secrets",
-  "environments",
-  "actions_variables",
-  "organization_actions_variables",
+// The only permissions the broker will ever grant write access to, whatever
+// MAX_PERMISSIONS says; a ceiling asking for write on anything else fails every
+// mint and is reported by GET /version. Everything else (workflows,
+// administration, members, every kind of secret, hooks, runners, environments,
+// variables, org settings) is read-only at most. An allowlist, so permissions
+// GitHub adds later are read-only until someone decides otherwise.
+export const WRITABLE = [
+  "contents",
+  "pull_requests",
+  "issues",
+  "actions",
+  "checks",
+  "statuses",
+  "deployments",
+  "pages",
+  "discussions",
 ];
 
 // Parse a MAX_PERMISSIONS JSON object ({"contents":"write",...}); fall back to
@@ -42,7 +44,7 @@ export function parseMaxPermissions(raw: string | undefined): PermissionSet {
   for (const [name, level] of Object.entries(parsed as Record<string, unknown>)) {
     if (!/^[a-z_]{1,64}$/.test(name)) throw new Error(`MAX_PERMISSIONS: bad permission name ${name}`);
     if (level !== "read" && level !== "write") throw new Error(`MAX_PERMISSIONS: ${name} must be read or write`);
-    if (level === "write" && NEVER_WRITE.includes(name)) throw new Error(`MAX_PERMISSIONS: ${name} may not be write`);
+    if (level === "write" && !WRITABLE.includes(name)) throw new Error(`MAX_PERMISSIONS: ${name} may not be write`);
     result[name] = level;
   }
   return result;

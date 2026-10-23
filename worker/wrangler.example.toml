@@ -33,8 +33,9 @@ GITHUB_ORG = "<your-org>"
 # Only members of this team (org/<team-slug>) can log in and mint tokens.
 GITHUB_TEAM = "<team-slug>"
 # Optional cap on minted permissions (JSON). Default: contents, pull_requests
-# and issues write; actions, checks, statuses read. Workflows, administration,
-# members, secrets, environments and Actions variables can never be write.
+# and issues write; actions, checks, statuses read. Only contents, pull_requests,
+# issues, actions, checks, statuses, deployments, pages and discussions can ever
+# be write; everything else (workflows, administration, secrets…) is read at most.
 # MAX_PERMISSIONS = '{"contents":"write","pull_requests":"write","issues":"write","actions":"read","checks":"read","statuses":"read"}'
 # Requests that name no permissions get read-only tokens. "ceiling" restores
 # the full-ceiling default for CLIs older than 0.2.0 during an upgrade.

@@ -26,9 +26,10 @@ remain the gate that decides what any token can change.
 - **One-hour, narrowed tokens.** Every token is a GitHub App installation
   token that expires after one hour, names at most 20 repositories, and
   carries no more than the intersection of the request, `MAX_PERMISSIONS`, and
-  what the installation was granted. Write access to administration, members,
-  secrets, environments and Actions variables can never be granted
-  (`NEVER_WRITE` in `worker/src/lib.ts`), whatever the configuration says.
+  what the installation was granted. Only contents, pull requests, issues,
+  Actions, checks, statuses, deployments, pages and discussions can ever be
+  write (`WRITABLE` in `worker/src/lib.ts`), whatever the configuration says;
+  everything else is read-only at most.
 - **Team-gated human login, no stored user token.** Only members of one
   GitHub team get a session. The GitHub user token used to read the login is
   revoked in the same request. Membership is rechecked on every request
@@ -104,7 +105,9 @@ your Cloudflare account.
   of the above until removed from the team. Actions they take through the bot
   are logged with their login.
 - **What the design does:** rechecks membership on every request (five-minute
-  cache), revokes all of a removed member's sessions on their next request,
+  cache), revokes all of a removed member's sessions on their next request
+  after that, treats a missing team as a configuration error rather than a
+  removal,
   and records every mint.
 - **What you should do:** keep the team small, require two-factor
   authentication in the org, and install the App only on the repositories
@@ -125,8 +128,8 @@ your Cloudflare account.
 - **What it does not do:** contain an agent. See non-goals below.
 - **What you should do:** for containment, run agents as a different OS user
   or in a sandbox that cannot read `~/.config/agent-identity` or your personal
-  credentials. Set `AGENT_IDENTITY_PERSONAL=deny` (or `read`) so agent shells
-  do not use your personal login by default.
+  credentials. Keep the default `AGENT_IDENTITY_PERSONAL=read`, or use `deny`,
+  so agent shells cannot write with your personal login.
 
 ### The template's code and its dependencies
 
@@ -197,8 +200,8 @@ These are accepted. They match the README's "Limits and residual risk".
 - **Login phishing.** A login someone else started can be completed in your
   browser if you open their link; only a listener on your own machine could
   use the resulting code. Treat unexpected login links as phishing.
-- **Case-sensitive remote matching.** git's URL matching is case-sensitive,
-  so a remote written in a different letter case than the configured org skips
-  the bot and uses your personal credential helper.
+- **Remote spellings.** Credentials reach the broker for any letter case, but
+  the bot commit identity follows git's case-sensitive `includeIf`, and SSH
+  host aliases are not rewritten (such pushes use your SSH key).
 - **Harnesses that reset `PATH`** hide the shim while git's half of the
   integration still applies.

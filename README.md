@@ -26,7 +26,7 @@ What you get:
   manifest flow straight into a Worker secret. Nobody downloads a `.pem`.
 - **Team-gated human login.** A person logs in once per machine through
   GitHub in the browser. Only members of one GitHub team can get a session,
-  and removing someone from the team cuts them off on their next request.
+  and removing someone from the team cuts them off within five minutes.
 - **Transparent per-shell routing.** In shells your agents run, `git` and `gh`
   use the bot automatically for your org's repositories. Your own terminal,
   and other orgs' repositories, keep your personal login.
@@ -48,7 +48,8 @@ opens GitHub in the browser. After GitHub authorizes the App, the broker reads
 your login, revokes the GitHub user token immediately, checks your team
 membership, and redirects the browser back to the loopback port with a one-time
 code. The CLI trades that code (plus a secret only it knows) for a 30-day
-session. A login link sent to someone else cannot deliver a session to the
+session. The GitHub authorization uses PKCE, so a leaked authorization code is
+useless on its own. A login link sent to someone else cannot deliver a session to the
 person who started it, and no GitHub user token is ever stored.
 
 **Minting.** `agent-identity token --repo api` asks the broker for a token for
@@ -60,7 +61,8 @@ permissions at both `MAX_PERMISSIONS` and what the installation was granted,
 mints an installation token with the App JWT, and records it. The audit write
 fails closed: if it cannot be stored, the token is revoked at GitHub and never
 returned. Records carry the token's sha256 in hex and in base64, the form
-GitHub's audit log uses for `hashed_token`. The CLI caches a token until ten
+GitHub's audit log uses for `hashed_token` (searchable through the audit log
+API on GitHub Enterprise Cloud). The CLI caches a token until ten
 minutes before expiry; `logout` and `revoke-all` revoke cached tokens at
 GitHub. Mints are rate-limited per session, and login starts per IP.
 
@@ -69,32 +71,40 @@ startup files. In a shell where a configured variable marks an agent (for
 example `CLAUDECODE`, set by Claude Code), it:
 
 - puts the `gh` shim first on `PATH`. Commands that target one of your org's
-  repositories (through `-R`, a URL, an `owner/name` argument, `gh api
-  repos/<org>/…`, or else the current checkout's `origin`) run with a bot token
-  for that repository. Account-level commands and other orgs' repositories
-  pass through to your personal login, as `AGENT_IDENTITY_PERSONAL` allows
-  (see below). For commands routed to the bot: if minting fails, or the bot
+  repositories run with a bot token for that repository, however the target is
+  spelled: `-R`/`--repo` (including `-R=`), a URL or `owner/name` argument in
+  any letter case and with `www.`, `api.`, `git@…:` or `ssh://` forms, `gh api
+  repos/<org>/…` or `repos/{owner}/{repo}/…`, `GH_REPO`, or else any remote of
+  the current checkout (so a fork whose `upstream` is the org counts). A target
+  that names your org but cannot be resolved to a github.com repository is
+  refused, never sent through your login. Account-level commands and other
+  orgs' repositories use your personal login, as `AGENT_IDENTITY_PERSONAL`
+  allows (see below). For commands routed to the bot: if minting fails, or the bot
   lacks a permission the command needs, the shim refuses rather than quietly
   using your login. A write never falls back to your login, because a person
   is often an org admin and borrowing that would let an agent do what the bot
   is denied. For the same reason, writes to your org's org-level endpoints,
   numeric-id endpoints (`repositories/<id>`), GraphQL mutations outside an org
   checkout, and secret or variable writes are refused outright;
-- loads a git config through `GIT_CONFIG_COUNT`, so in repositories with a
-  remote in your org, commits are authored by the bot, SSH remotes are routed
-  through HTTPS, and git authenticates with broker tokens only.
+- loads a git config through `GIT_CONFIG_COUNT` (appended after any entries a
+  harness already set), so in repositories with a remote in your org, commits
+  are authored by the bot, SSH and `www.` spellings of org remotes are routed
+  through `https://github.com`, and git asks the broker first for every
+  github.com credential: it answers for your org in any letter case, and git
+  falls through to your usual helpers for anyone else. Git credentials are
+  minted with `contents: write` (a push needs it); `gh auth token` inside an
+  org checkout returns a write token for the same reason.
 
 Human shells are untouched. Set `AGENT_IDENTITY_DISABLE=1` to opt a shell out
 and `AGENT_IDENTITY_DEBUG=1` to see which identity is used.
 
-**What still uses your personal login.** By default
-(`AGENT_IDENTITY_PERSONAL=allow`), any `gh` command the shim cannot tie to one
-of your org's repositories runs as you, exactly as in your own terminal: other
+**What still uses your personal login.** `gh` commands the shim cannot tie to
+one of your org's repositories use your login, as `AGENT_IDENTITY_PERSONAL`
+allows. The default, `read`, lets them only *read*: writes, and `gh auth
+token` outside an org checkout (which would print your token), are refused.
+`allow` lets agents use your login as you would in your own terminal (other
 orgs' repositories, account commands, `gh project … --owner <org>`, team
-endpoints, GraphQL sent from a file, and `gh auth token` outside an org
-checkout (which prints your token). Set `AGENT_IDENTITY_PERSONAL=read` to let
-agents only *read* with your login (writes and `gh auth token` are refused), or
-`deny` to keep agent shells off your login entirely. `read` judges commands by
+endpoints), and `deny` keeps agent shells off your login entirely. `read` judges commands by
 name (`list`, `view`, a GET request, an inline GraphQL query); a `gh` extension
 with a `list` subcommand runs its own code with your login, so prefer `deny`
 where agents need nothing personal. A `GH_TOKEN` or `GITHUB_TOKEN` inherited
@@ -106,7 +116,7 @@ shim step aside whenever one is set.
 
 Requirements: [Bun](https://bun.sh), `jq`, `git` 2.36 or newer, `gh`, and a
 Cloudflare account with [Wrangler](https://developers.cloudflare.com/workers/wrangler/)
-logged in. `~/.local/bin` must be on `PATH` (the CLI is linked there, and git
+installed globally and logged in. `~/.local/bin` must be on `PATH` (the CLI is linked there, and git
 calls it as a credential helper). You need to be an owner of the GitHub org.
 
 1. **Make your instance** (see [Keeping your instance up to date](#keeping-your-instance-up-to-date)
@@ -132,20 +142,20 @@ calls it as a credential helper). You need to be an owner of the GitHub org.
 4. **Log in** on each machine, once per 30 days:
    `bun cli/agent-identity.ts login --broker https://<your-broker-url>`.
 5. **Wire agent shells** on each machine: `agent-env/install.sh`. Then open a
-   new agent shell and check `command -v gh` points at
-   `~/.local/share/agent-identity/bin/gh`.
+   new agent shell and run `agent-identity doctor`. To remove the integration
+   later, run `agent-identity logout` and then `agent-env/install.sh --uninstall`.
 
 ### Configuration
 
 | Setting | Where | Meaning |
 | --- | --- | --- |
 | `GITHUB_ORG`, `GITHUB_TEAM` | `worker/wrangler.toml` `[vars]` | The org, and the team (slug) whose members may log in. |
-| `MAX_PERMISSIONS` | `worker/wrangler.toml` `[vars]` | JSON cap on minted permissions. Default: `contents`, `pull_requests`, `issues` write; `actions`, `checks`, `statuses` read. Workflows, repository and org administration, members, secrets, environments and Actions variables can never be write (`NEVER_WRITE` in `worker/src/lib.ts`); a cap naming one is refused, and `GET /version` reports it. |
+| `MAX_PERMISSIONS` | `worker/wrangler.toml` `[vars]` | JSON cap on minted permissions. Default: `contents`, `pull_requests`, `issues` write; `actions`, `checks`, `statuses` read. Only `contents`, `pull_requests`, `issues`, `actions`, `checks`, `statuses`, `deployments`, `pages` and `discussions` can ever be write (`WRITABLE` in `worker/src/lib.ts`); everything else, including workflows, administration, members, secrets, hooks and runners, is read-only at most; a cap naming one is refused, and `GET /version` reports it. |
 | `DEFAULT_ACCESS` | `worker/wrangler.toml` `[vars]` | `read` (default): a request naming no permissions gets a read-only token. `ceiling`: it gets the full cap, which CLIs older than 0.2.0 expect; use only while upgrading them. |
 | `APP_PRIVATE_KEY`, `APP_CLIENT_SECRET` | Worker secrets | Set by `create-app.ts`. Never committed. |
 | `AGENT_IDENTITY_DETECT` | `~/.config/agent-identity/env.sh` | Variables whose presence marks an agent shell. Add your orchestrator's session variable here. |
 | `AGENT_IDENTITY_LABEL_VARS` | same | Variables naming the agent session; the first one set labels each token. |
-| `AGENT_IDENTITY_PERSONAL` | `env.sh` or environment | `allow` (default), `read` or `deny`: what agent shells may do with your personal login for commands not routed to the bot. |
+| `AGENT_IDENTITY_PERSONAL` | `env.sh` or environment | `read` (default), `allow` or `deny`: what agent shells may do with your personal login for commands not routed to the bot. |
 | `AGENT_IDENTITY_FALLBACK` | environment | `personal` lets a read-only command the bot is not permitted run on your login, including ruleset reads (GitHub shows bypass actors only to admins, never to an App). Writes are always refused. Default: refuse. |
 
 ## Use
@@ -253,17 +263,18 @@ Read this before relying on it.
   logged. It is not containment. For containment, run agents as a different
   user or in a sandbox that cannot read your config directory.
 - **This does not remove your personal credentials.** It stops agents acting
-  as you *by default* on your org's repositories. With the default
-  `AGENT_IDENTITY_PERSONAL=allow`, other `gh` commands still run as you (see
-  "What still uses your personal login"). And if your personal `gh` login, SSH
-  keys or browser sessions are reachable from agent shells, a determined agent
-  can bypass the shim and use them directly. Use `read` or `deny`, and move or
-  lock those credentials separately.
-- **Remote URLs must use the org's exact letter case.** git's `includeIf`,
-  `insteadOf` and per-URL credential settings match case-sensitively, so a
-  remote written `github.com/MYORG/x` when the config says `myorg` skips the
-  bot and uses your personal credential helper. Keep remotes in one case, or
-  add the variants to the generated `agent.gitconfig`.
+  as you *by default* on your org's repositories, and by default lets them only
+  read with your login elsewhere (see "What still uses your personal login").
+  If your personal `gh` login, SSH keys or browser sessions are reachable from
+  agent shells, a determined agent can bypass the shim and use them directly.
+  Move or lock those credentials separately.
+- **Some remote spellings keep your identity.** Credentials go to the broker
+  for your org in any letter case, but git's `includeIf` matching (which sets
+  the bot as commit author) is case-sensitive, so a remote written
+  `github.com/MYORG/x` when the config says `myorg` commits under your git
+  identity while pushing as the bot. SSH host aliases (`git@github-work:org/x`)
+  are not rewritten: such a push uses your SSH key. Keep remotes in the
+  canonical form.
 - **A started login can be completed in someone else's browser.** GitHub skips
   the consent screen for an App the person already authorized, so a link from
   a login someone else started makes the victim's browser request
@@ -287,8 +298,8 @@ Read this before relying on it.
 - **Workflows and Actions.** Pushes by App tokens trigger workflows, so keep
   deployment secrets in environments with branch restrictions. The broker never
   grants `workflows` write, so agents cannot edit `.github/workflows`; if your
-  team needs that, change `NEVER_WRITE` deliberately in your fork of the
-  template, not in configuration.
+  team needs that, change `WRITABLE` in `worker/src/lib.ts` deliberately in your
+  fork of the template, not in configuration.
 - **Cloudflare KV write limits.** Every mint writes at least two audit records,
   and the audit fails closed: once the account's KV write quota is exhausted
   (the free plan allows 1,000 writes a day), every mint returns 503 until it

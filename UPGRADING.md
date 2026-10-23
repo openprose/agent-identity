@@ -110,6 +110,13 @@ code rollback.
 
 ## Breaking changes by release
 
+- **0.2.7:** `AGENT_IDENTITY_PERSONAL` now defaults to `read`; add
+  `export AGENT_IDENTITY_PERSONAL=allow` to `env.sh` if agents must write with
+  people's own logins elsewhere. `MAX_PERMISSIONS` may ask write only on
+  `contents`, `pull_requests`, `issues`, `actions`, `checks`, `statuses`,
+  `deployments`, `pages` and `discussions`. Re-run `agent-env/install.sh` on
+  each machine so the new git credential order applies.
+
 - **0.2.0:** remove `"workflows":"write"` from `MAX_PERMISSIONS` if present
   (it is now refused, and every mint fails until you do). Requests that name
   no permissions get read-only tokens; set `DEFAULT_ACCESS = "ceiling"` in

@@ -4,8 +4,12 @@
   "description": "Identity for {org}'s AI agents. One-hour tokens are minted per agent session by the team's own broker.",
   "public": false,
   "redirect_url": "http://127.0.0.1:{port}/callback",
-  "callback_urls": ["{broker}/v1/login/callback"],
-  "hook_attributes": { "url": "{broker}/webhook", "active": false },
+  "callback_urls": [
+    "{broker}/v1/login/callback"
+  ],
+  "hook_attributes": {
+    "active": false
+  },
   "request_oauth_on_install": false,
   "default_events": [],
   "default_permissions": {

@@ -6,8 +6,8 @@
 #
 #   AGENT_IDENTITY_AGENT=1            set by agent-env.sh; the shim is inert without it
 #   AGENT_IDENTITY_ORG=<org>          the org whose repositories use the bot
-#   AGENT_IDENTITY_PERSONAL=allow|read|deny
-#                                     what may use the personal login (default allow)
+#   AGENT_IDENTITY_PERSONAL=read|allow|deny
+#                                     what may use the personal login (default read)
 #   AGENT_IDENTITY_FALLBACK=personal  a read-only command the bot is not
 #                                     permitted may use the personal login;
 #                                     writes are always refused (default: refuse)
@@ -82,24 +82,84 @@ lower() { printf %s "$1" | tr '[:upper:]' '[:lower:]'; }
 org_lc=$(lower "$org")
 repo=""
 
-# owner/name from -R/--repo, a github.com URL, or a bare owner/name argument.
+# Parse a repository reference in any form gh or git accepts (owner/name, a
+# github.com URL in any letter case, www./api. hosts, git@host:owner/name,
+# ssh://, git+https://, -R=value) and print "<kind> <owner>/<name>", where kind
+# is "gh" for github.com and "other" for any other host (such as an SSH alias).
+repo_ref() {
+  local v=${1#=} lc host rest
+  lc=$(lower "$v")
+  if [[ $lc =~ ^(git\+)?[a-z][a-z0-9+.-]*://([^@/]+@)?([^/:]+)(:[0-9]+)?/ ]]; then
+    host=${BASH_REMATCH[3]}; rest=${v:${#BASH_REMATCH[0]}}
+  elif [[ $lc =~ ^([^@/:]+@)?([^/:]+): ]]; then
+    host=${BASH_REMATCH[2]}; rest=${v:${#BASH_REMATCH[0]}}
+  elif [[ $lc =~ ^((www|api)\.)?github\.com/ ]]; then
+    host=github.com; rest=${v:${#BASH_REMATCH[0]}}
+  else
+    host=""; rest=$v
+  fi
+  local kind=other
+  case "$host" in ""|github.com|www.github.com|api.github.com) kind=gh ;; esac
+  if [ "$host" = api.github.com ] && [[ $(lower "$rest") == repos/* ]]; then rest=${rest#*/}; fi
+  rest=${rest#/}
+  local owner=${rest%%/*}
+  [ "$owner" != "$rest" ] || return 0
+  local name=${rest#*/}
+  name=${name%%/*}; name=${name%%[?#]*}; name=${name%.git}
+  [[ $owner =~ ^[A-Za-z0-9-]+$ ]] && [[ $name =~ ^[A-Za-z0-9._-]+$ ]] && [ "$name" != . ] && [ "$name" != .. ] || return 0
+  printf '%s %s/%s' "$kind" "$owner" "$name"
+}
+
+# The repository name when a github.com reference is in the org, else nothing.
 from_arg() {
-  local value=${1#https://github.com/}
-  value=${value#http://github.com/}
-  value=${value#github.com/}
-  local owner=${value%%/*} rest=${value#*/}
-  local name=${rest%%/*}
-  name=${name%.git}
-  if [ "$owner" != "$value" ] && [ "$(lower "$owner")" = "$org_lc" ] && [[ $name =~ ^[A-Za-z0-9._-]+$ ]] \
-    && [ "$name" != . ] && [ "$name" != .. ]; then
-    printf %s "$name"
+  local ref
+  ref=$(repo_ref "$1")
+  [ -n "$ref" ] && [ "${ref%% *}" = gh ] || return 0
+  ref=${ref#* }
+  [ "$(lower "${ref%%/*}")" = "$org_lc" ] && printf %s "${ref#*/}"
+}
+
+# An explicit repository argument (-R/--repo): the org repository name, or
+# "personal" when it is clearly someone else's. Anything that might be the org
+# but cannot be resolved to a github.com repository is refused, never sent
+# through the personal login.
+explicit_repo() {
+  local ref
+  ref=$(repo_ref "$1")
+  if [ -z "$ref" ]; then
+    [[ $(lower "$1") == *"$org_lc"* ]] && refuse "cannot resolve repository '$1'"
+    printf personal; return 0
+  fi
+  local kind=${ref%% *} owner_name=${ref#* }
+  if [ "$(lower "${owner_name%%/*}")" = "$org_lc" ]; then
+    [ "$kind" = gh ] || refuse "repository '$1' names $org on a host other than github.com"
+    printf '%s' "${owner_name#*/}"
+  else
+    printf personal
   fi
 }
 
-origin_repo() {
-  local origin
-  origin=$(git remote get-url origin 2>/dev/null) || return 0
-  from_arg "${origin#git@github.com:}"
+# The repository commands act on when they name none, as gh resolves it:
+# GH_REPO, else the checkout's remotes (origin first, then the rest, so a fork
+# whose upstream is the org counts). Remotes on SSH host aliases count too.
+context_repo() {
+  if [ -n "${GH_REPO:-}" ]; then
+    local ref
+    ref=$(repo_ref "$GH_REPO")
+    ref=${ref#* }
+    [ -n "$ref" ] && [ "$(lower "${ref%%/*}")" = "$org_lc" ] && printf %s "${ref#*/}"
+    return 0
+  fi
+  local remote url ref
+  for remote in origin $(git remote 2>/dev/null | grep -vx origin); do
+    url=$(git remote get-url "$remote" 2>/dev/null) || continue
+    ref=$(repo_ref "$url")
+    ref=${ref#* }
+    if [ -n "$ref" ] && [ "$(lower "${ref%%/*}")" = "$org_lc" ]; then
+      printf %s "${ref#*/}"
+      return 0
+    fi
+  done
 }
 
 # Writes never use the personal login: a person is often an org admin, and
@@ -113,12 +173,12 @@ refuse() {
 
 # Commands the shim cannot tie to one of your org's repositories run on the
 # personal login, subject to AGENT_IDENTITY_PERSONAL:
-#   allow (default)  pass through, as in a human shell
-#   read             pass through only read-only commands; refuse writes and
+#   read (default)   pass through only read-only commands; refuse writes and
 #                    `gh auth token` (which would hand the agent your token)
+#   allow            pass through, as in a human shell
 #   deny             refuse everything that would use the personal login
 personal() {
-  case "${AGENT_IDENTITY_PERSONAL:-allow}" in
+  case "${AGENT_IDENTITY_PERSONAL:-read}" in
     allow) run_unrouted "$@" ;;
     deny) refuse "AGENT_IDENTITY_PERSONAL=deny: agent shells never use the personal login" ;;
   esac
@@ -128,7 +188,7 @@ personal() {
     api)
       if [[ " $* " == *" graphql "* ]]; then
         # An inline GraphQL query, never a mutation or a query read from a file.
-        if [[ " $* " != *mutation* ]] && [[ " $* " != *"=@"* ]] && [[ " $* " != *" --input "* ]]; then
+        if [[ " $* " != *mutation* ]] && [[ " $* " != *"=@"* ]] && [[ " $* " != *"--input"* ]]; then
           readonly_cmd=1
         fi
       elif [ "$method" = GET ]; then
@@ -144,7 +204,7 @@ personal() {
 # The HTTP method of a gh api call (gh defaults to POST when fields are sent).
 method=GET
 for arg in "$@"; do
-  case "$arg" in -f|--raw-field|-F|--field|--input) method=POST ;; esac
+  case "$arg" in -f|--raw-field|-F|--field|--input|-f?*|-F?*|--raw-field=*|--field=*|--input=*) method=POST ;; esac
 done
 prev=""
 for arg in "$@"; do
@@ -166,7 +226,7 @@ esac
 # checkout of an org repository; other auth commands pass through.
 if [ "$1" = "auth" ]; then
   case "$2" in
-    token|git-credential) repo=$(origin_repo) ;;
+    token|git-credential) repo=$(context_repo) ;;
   esac
   [ -n "$repo" ] || personal "$@"
   token=$(agent-identity token --repo "$repo" --write) || exit 1
@@ -178,16 +238,21 @@ if [ "$1" = "auth" ]; then
 fi
 
 prev=""
+explicit=""
 for arg in "$@"; do
   case "$prev" in
-    -R|--repo) repo=$(from_arg "$arg"); [ -n "$repo" ] || personal "$@"; break ;;
+    -R|--repo) explicit=$arg; break ;;
   esac
   case "$arg" in
-    --repo=*) repo=$(from_arg "${arg#--repo=}"); [ -n "$repo" ] || personal "$@"; break ;;
-    -R?*) repo=$(from_arg "${arg#-R}"); [ -n "$repo" ] || personal "$@"; break ;;
+    --repo=*) explicit=${arg#--repo=}; break ;;
+    -R?*) explicit=${arg#-R}; break ;;
   esac
   prev=$arg
 done
+if [ -n "$explicit" ]; then
+  repo=$(explicit_repo "$explicit") || exit 1
+  [ "$repo" = personal ] && personal "$@"
+fi
 
 if [ -z "$repo" ] && [ "$1" = "api" ]; then
   # gh api: the endpoint path decides; only GraphQL falls back to the cwd.
@@ -199,7 +264,8 @@ if [ -z "$repo" ] && [ "$1" = "api" ]; then
         skip=1; continue ;;
       -*) continue ;;
     esac
-    path=${arg#https://api.github.com}
+    path=$arg
+    if [[ $(lower "$path") =~ ^https?://((www|api)\.)?github\.com ]]; then path=${path:${#BASH_REMATCH[0]}}; fi
     path=${path#/}
     if [[ $(lower "$path") =~ ^orgs/$org_lc(/|\?|$) ]] && [ "$method" != GET ]; then
       refuse "org-level writes are never routed to the bot or the personal login"
@@ -208,11 +274,15 @@ if [ -z "$repo" ] && [ "$1" = "api" ]; then
       refuse "numeric-id endpoint writes are not routed"
     elif [[ $(lower "$path") =~ ^repos/$org_lc/[a-z0-9._-]+(/|\?|$) ]]; then
       repo=$(printf %s "$path" | cut -d/ -f3 | cut -d'?' -f1)
-    elif [ "$path" = graphql ]; then
-      repo=$(origin_repo)
-      # A mutation can target an org resource by node id from anywhere.
-      if [ -z "$repo" ] && [[ " $* " == *mutation* ]]; then
-        refuse "GraphQL mutations outside an org checkout are not routed"
+    elif [[ $path == *"{owner}"* || $path == *"{repo}"* || $path == *":owner"* || $path == *":repo"* ]]; then
+      # gh fills placeholders from the current repository, as resolved below.
+      repo=$(context_repo)
+    elif [ "$(lower "$path")" = graphql ]; then
+      repo=$(context_repo)
+      # A mutation, or a body the shim cannot see, can target an org resource
+      # by node id from anywhere.
+      if [ -z "$repo" ] && { [[ " $* " == *mutation* ]] || [[ " $* " == *"=@"* ]] || [[ " $* " == *"--input"* ]]; }; then
+        refuse "GraphQL mutations (or bodies read from files) outside an org checkout are not routed"
       fi
     fi
     break
@@ -228,7 +298,7 @@ if [ -z "$repo" ]; then
   done
 fi
 
-[ -n "$repo" ] || repo=$(origin_repo)
+[ -n "$repo" ] || repo=$(context_repo)
 [ -n "$repo" ] || personal "$@"
 
 # The permission this command needs beyond contents/PR/issues, if any.
@@ -245,7 +315,7 @@ esac
 if [ "$1" = api ]; then
   # GitHub shows ruleset bypass actors only to repository admins, never to an
   # App, so with read fallback enabled, ruleset reads use the personal login.
-  if [ "$method" = GET ] && [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${AGENT_IDENTITY_PERSONAL:-allow}" != deny ] && [[ " $* " == */rulesets* ]]; then
+  if [ "$method" = GET ] && [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${AGENT_IDENTITY_PERSONAL:-read}" != deny ] && [[ " $* " == */rulesets* ]]; then
     echo "agent-identity: ruleset bypass actors are visible only to admins; this read uses the personal login." >&2
     run_unrouted "$@"
   fi
@@ -285,7 +355,7 @@ if [ -n "$need" ]; then
   if ! { [ "$have" = write ] || { [ "$have" = read ] && [ "${need##*:}" = read ]; }; }; then
     # Opt-in: a read the bot is not granted may use the personal login.
     # Anything that writes is always refused.
-    if [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${AGENT_IDENTITY_PERSONAL:-allow}" != deny ] && [ "${need##*:}" = read ] && [ "$method" = GET ]; then
+    if [ "$AGENT_IDENTITY_FALLBACK" = personal ] && [ "${AGENT_IDENTITY_PERSONAL:-read}" != deny ] && [ "${need##*:}" = read ] && [ "$method" = GET ]; then
       echo "agent-identity: the bot lacks ${need}; this read-only gh command uses the personal login." >&2
       run_unrouted "$@"
     fi

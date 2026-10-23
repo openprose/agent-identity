@@ -6,6 +6,7 @@
 
 import {
   appJwt,
+  base64url,
   parseDefaultAccess,
   parseMaxPermissions,
   sha256Base64,
@@ -36,7 +37,7 @@ export interface Env {
 
 const GITHUB_API = "https://api.github.com";
 // Bump with each template release; `agent-identity doctor` compares it.
-export const TEMPLATE_VERSION = "0.2.6";
+export const TEMPLATE_VERSION = "0.2.7";
 const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 const LOGIN_TTL_SECONDS = 600;
 const MEMBERSHIP_CACHE_SECONDS = 300;
@@ -47,6 +48,8 @@ const MAX_CODE_ATTEMPTS = 5;
 
 type LoginRecord = {
   poll_hash: string;
+  // PKCE: a leaked GitHub `code` is useless without this verifier.
+  code_verifier: string;
   redirect_port: number;
   device: string;
   created_at: string;
@@ -197,11 +200,19 @@ async function createInstallationToken(
   env: Env,
   body: { repositories?: string[]; permissions: Record<string, string> },
 ): Promise<{ token: string; expires_at: string; permissions: Record<string, string>; repositories?: { name: string }[] }> {
-  const id = await installationId(env);
-  const response = await github(`/app/installations/${id}/access_tokens`, await jwt(env), {
+  let response = await github(`/app/installations/${await installationId(env)}/access_tokens`, await jwt(env), {
     method: "POST",
     body: JSON.stringify(body),
   });
+  if (response.status === 404) {
+    // The App may have been reinstalled under a new installation id.
+    installationIdCache = undefined;
+    grantedCache = undefined;
+    response = await github(`/app/installations/${await installationId(env)}/access_tokens`, await jwt(env), {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
   if (!response.ok) {
     const detail = ((await response.json().catch(() => ({}))) as { message?: string }).message ?? "";
     throw new HttpError(response.status === 422 ? 422 : 502, `GitHub refused the token request: ${detail || response.status}`);
@@ -212,6 +223,11 @@ async function createInstallationToken(
 async function membersToken(env: Env): Promise<string> {
   if (membersTokenCache && membersTokenCache.expiresAt - Date.now() > 5 * 60_000) return membersTokenCache.token;
   const minted = await createInstallationToken(env, { permissions: { members: "read" } });
+  const extra = Object.keys(minted.permissions ?? {}).filter((name) => name !== "members" && name !== "metadata");
+  if (extra.length || minted.permissions?.members !== "read") {
+    await github("/installation/token", minted.token, { method: "DELETE" }).catch(() => undefined);
+    throw new HttpError(503, "the App must grant members: read for team checks");
+  }
   membersTokenCache = { token: minted.token, expiresAt: Date.parse(minted.expires_at) };
   return minted.token;
 }
@@ -223,7 +239,15 @@ async function isTeamMember(env: Env, login: string, useCache = true): Promise<b
     `/orgs/${env.GITHUB_ORG}/teams/${env.GITHUB_TEAM}/memberships/${encodeURIComponent(login)}`,
     await membersToken(env),
   );
-  if (response.status === 404) return false;
+  if (response.status === 404) {
+    // GitHub answers 404 for "not a member" and for "no such team"; only the
+    // first may revoke sessions.
+    const team = await github(`/orgs/${env.GITHUB_ORG}/teams/${env.GITHUB_TEAM}`, await membersToken(env));
+    if (team.status === 404) {
+      throw new HttpError(503, `team ${env.GITHUB_ORG}/${env.GITHUB_TEAM} not found; check GITHUB_TEAM (sessions kept)`);
+    }
+    return false;
+  }
   if (!response.ok) throw new HttpError(502, `team membership check failed (GitHub ${response.status})`);
   const active = ((await response.json()) as { state?: string }).state === "active";
   if (active) await env.STATE.put(cacheKey, "active", { expirationTtl: MEMBERSHIP_CACHE_SECONDS });
@@ -293,8 +317,10 @@ async function loginStart(env: Env, request: Request, origin: string): Promise<R
   const device =
     typeof body.device === "string" && /^[A-Za-z0-9._:@-]{1,64}$/.test(body.device) ? body.device : "unnamed";
   const loginId = randomToken("", 24);
+  const codeVerifier = randomToken("", 32);
   const record: LoginRecord = {
     poll_hash: body.poll_hash,
+    code_verifier: codeVerifier,
     redirect_port: port,
     device,
     created_at: new Date().toISOString(),
@@ -306,6 +332,11 @@ async function loginStart(env: Env, request: Request, origin: string): Promise<R
   authorize.searchParams.set("client_id", env.APP_CLIENT_ID!);
   authorize.searchParams.set("state", loginId);
   authorize.searchParams.set("redirect_uri", `${origin}/v1/login/callback`);
+  authorize.searchParams.set(
+    "code_challenge",
+    base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier))),
+  );
+  authorize.searchParams.set("code_challenge_method", "S256");
   return json({ login_id: loginId, url: authorize.toString(), expires_in: LOGIN_TTL_SECONDS });
 }
 
@@ -327,6 +358,7 @@ async function loginCallback(env: Env, url: URL, origin: string): Promise<Respon
       client_secret: env.APP_CLIENT_SECRET,
       code,
       redirect_uri: `${origin}/v1/login/callback`,
+      code_verifier: record.code_verifier,
     }),
   });
   const exchanged = (await exchange.json().catch(() => ({}))) as { access_token?: string };
@@ -420,9 +452,10 @@ async function loginFinish(env: Env, request: Request): Promise<Response> {
 
 async function mint(env: Env, request: Request): Promise<Response> {
   requireConfigured(env);
-  const { record, key } = await session(env, request);
-  if (!(await env.MINT_LIMIT.limit({ key })).success) {
-    throw new HttpError(429, "too many tokens minted by this session; reuse cached tokens (the CLI caches them)");
+  const { record } = await session(env, request);
+  // Per person, so extra sessions do not multiply the limit.
+  if (!(await env.MINT_LIMIT.limit({ key: `user:${record.user_id}` })).success) {
+    throw new HttpError(429, "too many tokens minted; reuse cached tokens (the CLI caches them)");
   }
   const validated = validateMintRequest(
     await readJson(request),
@@ -437,6 +470,9 @@ async function mint(env: Env, request: Request): Promise<Response> {
     else if (RANK[level] > RANK[have]) validated.permissions[name] = have as "read" | "write";
   }
 
+  // An empty permissions object would make GitHub grant everything the
+  // installation has; refuse rather than send one.
+  if (Object.keys(validated.permissions).length === 0) throw new HttpError(400, "no permissions left to grant");
   const minted = await createInstallationToken(env, {
     ...(validated.repositories ? { repositories: validated.repositories } : {}),
     permissions: validated.permissions,

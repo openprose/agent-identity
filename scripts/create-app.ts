@@ -2,14 +2,14 @@
 // One-time: register your agents' GitHub App from a manifest and hand its
 // secrets straight to your broker Worker.
 //
-//   bun scripts/create-app.ts --org <org> --broker https://<your broker> [--name <app name>] [--actions-write]
+//   bun scripts/create-app.ts --org <org> --broker https://<your broker> [--name <app name>] [--actions-write] [--port 47811]
 //
 // The private key and client secret pass through this process's memory and
 // into `wrangler secret put` on stdin. They are never written to disk or
 // printed. An owner of <org> clicks "Create GitHub App" in the browser.
 // Deploy the Worker once first (so --broker exists), from worker/wrangler.toml.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -30,6 +30,12 @@ const brokerUrl = new URL(BROKER_FLAG);
 if (brokerUrl.protocol !== "https:") throw new Error("--broker must be https");
 const BROKER = brokerUrl.origin;
 const WORKER_DIR = join(import.meta.dir, "..", "worker");
+// The key is only shown once, during the manifest conversion: make sure there
+// is somewhere to put it before an owner creates the App.
+if (!existsSync(join(WORKER_DIR, "wrangler.toml"))) {
+  console.error("worker/wrangler.toml is missing: copy worker/wrangler.example.toml, fill it in, and deploy once first.");
+  process.exit(2);
+}
 const state = randomBytes(16).toString("hex");
 
 // What the installation may grant comes from app-manifest.json, committed so
@@ -115,7 +121,11 @@ const server = Bun.serve({
       writeFileSync(tomlPath, toml);
       await wrangler(["deploy"]);
     } catch (error) {
-      done(`app ${app.slug} (id ${app.id}) was created but broker setup failed: ${(error as Error).message}`);
+      done(
+        `app ${app.slug} (id ${app.id}) was created but broker setup failed: ${(error as Error).message}\n` +
+          "Recover: in the App's settings, generate a new private key and pipe it to `wrangler secret put APP_PRIVATE_KEY`, " +
+          "generate a client secret for `wrangler secret put APP_CLIENT_SECRET`, add APP_ID, APP_CLIENT_ID and APP_SLUG to worker/wrangler.toml, then deploy.",
+      );
       return html(`<p>The app was created but configuring the broker failed. Check the terminal.</p>`);
     }
 
