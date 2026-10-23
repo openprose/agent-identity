@@ -100,6 +100,11 @@ describe("routing", () => {
     expect(write.out).toBe("");
   });
 
+  test("environment secret listings need the Environments permission", () => {
+    expect(gh(["secret", "list", "--env", "production", "-R", "myorg/api"]).code).toBe(1);
+    expect(gh(["secret", "list", "--env", "production", "-R", "myorg/api"], { AGENT_IDENTITY_FALLBACK: "personal" }).out).toStartWith("token=personal ");
+  });
+
   test("AGENT_IDENTITY_PROBE answers without running gh", () => {
     expect(gh(["version"], { AGENT_IDENTITY_PROBE: "1" }).out).toStartWith("agent-identity shim reached");
   });

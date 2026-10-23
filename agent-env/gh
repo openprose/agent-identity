@@ -235,7 +235,10 @@ fi
 need=""
 case "$1 $2" in
   "workflow run"|"workflow enable"|"workflow disable"|"run rerun"|"run cancel"|"run delete") need=actions:write ;;
-  "secret list") need=secrets:read ;;
+  "secret list")
+    # Environment secrets are gated on the Environments permission.
+    need=secrets:read
+    [[ " $* " == *" --env "* || " $* " == *" -e "* || " $* " == *" --env="* ]] && need=environments:read ;;
   "variable list"|"variable get") personal "$@" ;;
   "secret "*|"variable "*) refuse "secret and variable writes stay with people" ;;
 esac

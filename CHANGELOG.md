@@ -5,6 +5,10 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.5
+
+- `gh secret list --env <name>` needs the Environments permission (GitHub gates environment secrets on it), so the bot is refused unless granted, or the read uses the personal login with `AGENT_IDENTITY_FALLBACK=personal`.
+
 ## 0.2.4
 
 - Test fix only: the 0.2.3 ruleset test expected the wrong result for a ruleset write (it is refused, correctly). Same behaviour as 0.2.3.
