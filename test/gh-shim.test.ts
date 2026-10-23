@@ -93,7 +93,11 @@ describe("routing", () => {
     expect(gh(["api", "repos/myorg/api/rulesets/1"], env).out).toStartWith("token=personal ");
     // Without fallback the bot is used, and refused here: this token lacks administration.
     expect(gh(["api", "repos/myorg/api/rulesets/1"]).code).toBe(1);
-    expect(gh(["api", "-X", "PUT", "repos/myorg/api/rulesets/1"], env).out).toStartWith("token=botw-api ");
+    // A ruleset write needs administration write, which the bot never has:
+    // refused, and never sent through the personal login.
+    const write = gh(["api", "-X", "PUT", "repos/myorg/api/rulesets/1"], env);
+    expect(write.code).toBe(1);
+    expect(write.out).toBe("");
   });
 
   test("AGENT_IDENTITY_PROBE answers without running gh", () => {
