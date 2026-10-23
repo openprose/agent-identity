@@ -105,8 +105,15 @@ describe("routing", () => {
     expect(gh(["secret", "list", "--env", "production", "-R", "myorg/api"], { AGENT_IDENTITY_FALLBACK: "personal" }).out).toStartWith("token=personal ");
   });
 
-  test("AGENT_IDENTITY_PROBE answers without running gh", () => {
+  test("AGENT_IDENTITY_PROBE answers gh version only", () => {
     expect(gh(["version"], { AGENT_IDENTITY_PROBE: "1" }).out).toStartWith("agent-identity shim reached");
+    expect(gh(["pr", "list", "-R", "myorg/api"], { AGENT_IDENTITY_PROBE: "1" }).out).toStartWith("token=bot-api ");
+  });
+
+  test("AGENT_IDENTITY_PERSONAL=deny wins over read fallback", () => {
+    const env = { AGENT_IDENTITY_FALLBACK: "personal", AGENT_IDENTITY_PERSONAL: "deny" };
+    expect(gh(["api", "repos/myorg/api/rulesets/1"], env).code).toBe(1);
+    expect(gh(["secret", "list", "-R", "myorg/api"], env).code).toBe(1);
   });
 
   test("outside agent shells the shim is inert", () => {

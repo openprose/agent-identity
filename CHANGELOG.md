@@ -5,6 +5,11 @@ Merge tagged releases into your instance (see UPGRADING.md). Entries marked
 App's new permissions; entries marked **config** need a `worker/wrangler.toml`
 change.
 
+## 0.2.6
+
+- `AGENT_IDENTITY_PERSONAL=deny` now also overrides `AGENT_IDENTITY_FALLBACK=personal`.
+- The doctor probe answers only `gh version`, so a stray `AGENT_IDENTITY_PROBE` cannot turn other commands into silent successes.
+
 ## 0.2.5
 
 - `gh secret list --env <name>` needs the Environments permission (GitHub gates environment secrets on it), so the bot is refused unless granted, or the read uses the personal login with `AGENT_IDENTITY_FALLBACK=personal`.
